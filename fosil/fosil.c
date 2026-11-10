@@ -2309,7 +2309,7 @@ static void draw_update(void) {
     if (*fallo) text_wrap2(F_SANS, 19, fallo, 42, y, 26, W - 84, rgba(1, .62f, .5f, 1));
     bool buscando = now_s() - upd_buscando < 60 && u.comprobado == upd_comp_antes;
     float bw = (W - 68 - 12) / 2.f, by = H - 40 - 64;
-    if (upd_boton(ID(), 34, by - 12 - 72, W - 68, 72, "Actualizar", true, hay && !marcha)) {
+    if (upd_boton(ID(), 34, by - 12 - 72, W - 68, 72, "Actualizar", true, hay && !marcha && !buscando)) {
         upd_pulsado = now_s(); upd_solo_linux = false; upd_lanzar("fosil-actualizar.service");
     }
     if (upd_boton(ID(), 34, by, bw, 64, buscando ? "Buscando…" : "Buscar ahora", false, !marcha && !buscando)) {
