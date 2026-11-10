@@ -1,0 +1,26 @@
+#!/bin/sh
+. /usr/local/lib/fosil/comun.sh
+set -eu
+A=$FOSIL_VAR/audio; mkdir -p "$A"
+exec >>"$A/resultado.log" 2>&1
+date
+for intento in $(seq 1 25); do
+    [ -e /dev/snd/controlC0 ] && break
+    sleep 1
+done
+if [ ! -e /dev/snd/controlC0 ]; then
+    cat /proc/asound/cards
+    cat /sys/kernel/debug/devices_deferred || true
+    cp "$A/extlinux.original.conf" /boot/extlinux/extlinux.conf
+    sync
+    fosil-avisa 'Audio: no apareció la tarjeta. Restaurado el arranque original para el siguiente reinicio.' Codex
+    exit 1
+fi
+cat /proc/asound/cards
+aplay -l
+alsaucm -c hw:0 set _verb HiFi set _enadev Speaker
+amixer -c 0 cset name='RX3 Digital Volume' 72
+alsactl store
+como_usuario sh -c "cd '$HOME_U/apps/musica' && SDL_AUDIODRIVER=alsa ./musica --test"
+printf 'Prueba ALSA completada; falta confirmar escucha física.\n'
+fosil-avisa 'Audio: tarjeta detectada y reproducción ALSA comprobada. Prueba Música lofi en Creaciones.' Codex

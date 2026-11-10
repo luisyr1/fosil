@@ -1,0 +1,35 @@
+# Nunca al repositorio: herramientas, binarios, claves ni datos de sesión
+tools/
+lk2nd-23.1/
+known_hosts
+*.img
+*.zip
+*.ppm
+*.jsonl
+.env
+.env.*
+*.pem
+*.key
+id_*
+auth.json
+.credentials.json
+credentials*
+fosil/fosil
+fosil/*.o
+herramientas/capturas-prueba/
+*.dtb
+*.wav
+*.log
+apps/*/musica
+apps/*/ytmusic
+apps/*/crear-pistas
+*.tmp.*
+
+# Espacio de trabajo de los agentes
+.superpowers/
+privado/
+# Restos de herramientas del PC
+.claude-flow/
+.swarm/
+ruvector.db
+.claude/

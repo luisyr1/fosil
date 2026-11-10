@@ -1,0 +1,119 @@
+#!/bin/bash
+# Servicio del chat de Fósil. Recibe mensajes por una FIFO, ejecuta Claude Code o Codex
+# y deja la conversación en un registro que la interfaz pinta.
+# Permisos ($D/permisos, se cambia en Ajustes):
+#   total    acceso completo, con sudo y sin confirmación (decisión del dueño del móvil)
+#   limitado lee el sistema y escribe solo en ~/taller
+D=/var/lib/fosil/chat; F=$D/entrada; E=$D/estado; C=$D/convs
+mkdir -p "$D"; [ -p "$F" ] || { rm -f "$F"; mkfifo -m 600 "$F"; }
+mkdir -p "$C"; [ -f "$D/motor" ] || echo claude > "$D/motor"; [ -f "$D/permisos" ] || echo total > "$D/permisos"
+sesion=?; pid=
+motor() { cat "$D/motor"; }
+permisos() { cat "$D/permisos"; }
+estado() { printf '%s %s %s %s\n' "$1" "$(motor)" "$sesion" "$(permisos)" > "$E.tmp"; mv "$E.tmp" "$E"; }
+linea() { printf '%s|%s\n' "$1" "$(printf '%s' "$2" | sed ':a;N;$!ba;s/\n/\\n/g' | tr -d '\r')" >> "$L"; }
+recorta() { [ "$(wc -l < "$L")" -gt 600 ] && { tail -n 300 "$L" > "$L.tmp"; cat "$L.tmp" > "$L"; rm -f "$L.tmp"; }; }
+# Conversaciones: cada una vive en $C/<id>; $D/log apunta siempre a la actual.
+lista() {
+    for d in $(ls -t "$C" 2>/dev/null); do
+        [ -s "$C/$d/log" ] || continue
+        printf '%s|%s|%s\n' "$d" "$(date -r "$C/$d/log" '+%d/%m %H:%M')" "$(cat "$C/$d/titulo" 2>/dev/null)"
+    done > "$D/lista.tmp"; mv "$D/lista.tmp" "$D/lista"
+}
+cambia() { CONV=$1; L=$C/$CONV/log; printf '%s' "$CONV" > "$D/actual"; ln -sfn "convs/$CONV/log" "$D/log"; lista; }
+nueva() { local id; id=$(date +%s); mkdir -p "$C/$id"; touch "$C/$id/log"; cambia "$id"; }
+inicia_conv() {
+    if [ -f "$D/log" ] && [ ! -L "$D/log" ]; then   # registro antiguo, de antes de haber conversaciones
+        local id; id=$(date +%s); mkdir -p "$C/$id"; mv "$D/log" "$C/$id/log"; mv "$D"/sid.* "$C/$id/" 2>/dev/null
+        sed -n 's/^y|//p' "$C/$id/log" | head -1 | cut -c1-44 > "$C/$id/titulo"; cambia "$id"; return
+    fi
+    local a; a=$(cat "$D/actual" 2>/dev/null)
+    if [ -n "$a" ] && [ -d "$C/$a" ]; then cambia "$a"; else nueva; fi
+}
+empieza() {   # empieza <conversación> <mensaje>
+    local c=$1 msg=$2
+    [ "$c" = "$CONV" ] || cambia "$c"
+    [ -s "$C/$c/titulo" ] || printf '%s' "$msg" | cut -c1-44 > "$C/$c/titulo"
+    linea y "$msg"; estado pensando; lista
+    trabajar "$msg" "$c" & pid=$!
+}
+comprueba_sesion() {
+    case "$(motor)" in
+        codex) codex login status >/dev/null 2>&1 && sesion=si || sesion=no ;;
+        *) [ "$(claude auth status 2>/dev/null | jq -r .loggedIn 2>/dev/null)" = true ] && sesion=si || sesion=no ;;
+    esac
+}
+JQ_CLAUDE='fromjson? |
+  if .type=="system" and .subtype=="init" then "S|"+.session_id
+  elif .type=="assistant" then .message.content[]? |
+    if .type=="text" then "c|"+(.text|gsub("\n";"\\n"))
+    elif .type=="tool_use" then "t|"+.name+": "+((.input.command // .input.file_path // .input.pattern // "")|tostring|gsub("\n";" ")|.[0:160])
+    else empty end
+  elif .type=="rate_limit_event" then "R|"+((.rate_limit_info.unifiedWindows // empty)|tojson)
+  elif .type=="result" and .is_error==true then "e|"+((.result // .subtype // "Error")|tostring|gsub("\n";"\\n"))
+  else empty end'
+JQ_CODEX='fromjson? |
+  if .type=="thread.started" then "S|"+.thread_id
+  elif .type=="item.completed" and .item.type=="agent_message" then "c|"+(.item.text|gsub("\n";"\\n"))
+  elif .type=="item.started" and .item.type=="command_execution" then "t|"+(.item.command|sub("^[^ ]*bash -lc ";"")|gsub("\n";" ")|.[0:160])
+  elif .type=="error" then "e|"+(.message|tostring|gsub("\n";"\\n"))
+  elif .type=="turn.failed" then "e|"+((.error.message // "Error")|tostring|gsub("\n";"\\n"))
+  else empty end'
+CLAUDE_LIMITADO=(--permission-mode acceptEdits --allowedTools Read Glob Grep
+    "Bash(fosil-estado)" "Bash(fosil-avisa:*)" "Bash(free:*)" "Bash(df:*)" "Bash(uptime)" "Bash(ls:*)" "Bash(apk info:*)")
+trabajar() {
+    local msg=$1 conv=$2 m; m=$(motor); local sf="$C/$conv/sid.$m" sid; sid=$(cat "$sf" 2>/dev/null)
+    local L="$C/$conv/log"
+    if [ "$(permisos)" = total ]; then timeout 90 sudo -n /usr/local/bin/fosil-foto crear "$msg" >/dev/null 2>&1; fi
+    local ultimo="" cp cx
+    if [ "$(permisos)" = total ]; then cp=(--dangerously-skip-permissions); cx=(--dangerously-bypass-approvals-and-sandbox)
+    else cp=("${CLAUDE_LIMITADO[@]}"); cx=(--sandbox workspace-write); fi
+    {
+        if [ "$m" = codex ]; then
+            if [ -n "$sid" ]; then codex exec resume --json --skip-git-repo-check "${cx[@]}" "$sid" -- "$msg"
+            else codex exec --json --skip-git-repo-check "${cx[@]}" -- "$msg"; fi
+        else
+            claude -p --output-format stream-json --verbose "${cp[@]}" ${sid:+--resume "$sid"} -- "$msg"
+        fi
+    } </dev/null 2>>"$D/errores" | if [ "$m" = codex ]; then jq --unbuffered -R -r "$JQ_CODEX"; else jq --unbuffered -R -r "$JQ_CLAUDE"; fi |
+    while IFS= read -r l; do
+        case $l in
+            S\|*) printf '%s' "${l#S|}" > "$sf" ;;
+            R\|*) printf '%s\n' "${l#R|}" > "$D/limites-claude" ;;
+            e\|*) [ "${l#e|}" = "$ultimo" ] || echo "$l" >> "$L" ;;
+            c\|*) ultimo=${l#c|}; echo "$l" >> "$L"; printf '%s' "$ultimo" > "$D/ultima" ;;
+            *) echo "$l" >> "$L" ;;
+        esac
+    done
+    recorta
+    comprueba_sesion
+    estado listo
+    [ -s "$D/ultima" ] && fosil-avisa "$(cut -c1-120 "$D/ultima" | head -1)" "$m#$conv" 2>/dev/null
+    rm -f "$D/ultima"
+    echo '!siguiente' >&3
+}
+set -m
+inicia_conv; comprueba_sesion; estado listo
+exec 3<>"$F"
+while IFS= read -r l <&3; do
+    [ -n "$l" ] || continue
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then pid=; fi
+    case $l in
+        '!estado') [ -n "$pid" ] && estado pensando || { comprueba_sesion; estado listo; } ;;
+        '!parar') : > "$D/cola"; if [ -n "$pid" ]; then kill -TERM -- "-$pid" 2>/dev/null; pid=; linea e "Parado"; fi; estado listo ;;
+        '!siguiente')
+            pid=; [ -s "$D/cola" ] || continue
+            q=$(head -1 "$D/cola"); sed -i 1d "$D/cola"
+            empieza "${q%%	*}" "${q#*	}"
+            ;;
+        '!permisos total'|'!permisos limitado') [ -n "$pid" ] || { echo "${l#!permisos }" > "$D/permisos"; rm -f "$C"/*/sid.*; estado listo; } ;;
+        '!nuevo') [ -n "$pid" ] || { [ -s "$L" ] && nueva; estado listo; } ;;
+        '!abrir '*) id=${l#!abrir }; case $id in *[!0-9]*|'') ;; *) [ -n "$pid" ] || { [ -d "$C/$id" ] && cambia "$id"; estado listo; } ;; esac ;;
+        '!borrar '*) id=${l#!borrar }; case $id in *[!0-9]*|'') ;; *) [ -z "$pid" ] && [ -d "$C/$id" ] && { rm -rf "${C:?}/$id"; [ "$id" = "$CONV" ] && nueva; lista; estado listo; } ;; esac ;;
+        '!motor claude'|'!motor codex') [ -n "$pid" ] || { echo "${l#!motor }" > "$D/motor"; [ -s "$L" ] && nueva; comprueba_sesion; estado listo; } ;;
+        *)
+            if [ -n "$pid" ]; then printf '%s\t%s\n' "$CONV" "$l" >> "$D/cola"; linea t "En cola: $l"; continue; fi
+            empieza "$CONV" "$l"
+            ;;
+    esac
+done

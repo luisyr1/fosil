@@ -1,0 +1,7 @@
+#!/bin/sh
+# Deja en solo lectura el IMEI, la calibración y el arranque de bajo nivel. Evita accidentes, no es una barrera.
+for p in modemst1 modemst2 fsg fsc persist sbl1 aboot abootBackup rpm rpmBackup tz tzBackup hyp hypBackup; do
+    d=/dev/disk/by-partlabel/$p
+    [ -e "$d" ] && /usr/sbin/blockdev --setro "$(readlink -f "$d")" && echo "$p: solo lectura"
+done
+exit 0

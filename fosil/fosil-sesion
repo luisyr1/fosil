@@ -1,0 +1,50 @@
+#!/bin/sh
+# Bucle de sesión: Fósil <-> terminal. Tras 3 fallos seguidos prueba la versión estable;
+# si también falla, vuelve a la consola de texto.
+# El aviso de arranque de systemd impediría entrar con contraseña hasta el final del arranque.
+rm -f /run/nologin
+. /usr/local/lib/fosil/comun.sh
+fallos=0
+bin=/usr/local/bin/fosil
+while :; do
+    chvt 7
+    inicio=$(date +%s)
+    echo "$bin $(date +%s)" > "$FOSIL_RUN/binario"  # binario y hora de arranque, para fosil-actualizar confirmar
+    "$bin"
+    rc=$?
+    if [ "$rc" = 42 ]; then
+        fallos=0
+        systemctl start buffyboard
+        chvt 1
+        /usr/local/bin/fosil --esperar
+        systemctl stop buffyboard
+        continue
+    fi
+    if [ "$rc" = 43 ]; then   # app a pantalla completa: Bajar volumen vuelve a Fósil
+        fallos=0
+        su -s /bin/sh "$USUARIO" -c "$(cat /run/fosil/lanzar)" &
+        app=$!
+        /usr/local/bin/fosil --esperar &
+        esp=$!
+        while kill -0 "$app" 2>/dev/null && kill -0 "$esp" 2>/dev/null; do sleep 1; done
+        kill "$app" "$esp" 2>/dev/null
+        continue
+    fi
+    if [ $(( $(date +%s) - inicio )) -lt 10 ]; then
+        fallos=$((fallos + 1))
+    else
+        fallos=0
+    fi
+    if [ "$fallos" -ge 3 ] && [ "$bin" = /usr/local/bin/fosil ] && [ -x /usr/local/bin/fosil.estable ]; then
+        echo "Fósil falla al arrancar; paso a la versión estable" >&2
+        bin=/usr/local/bin/fosil.estable
+        fallos=0
+    fi
+    if [ "$fallos" -ge 3 ]; then
+        echo "Fósil falla al arrancar; paso a la consola de texto" >&2
+        systemctl start buffyboard
+        chvt 1
+        exit 1
+    fi
+    sleep 1
+done

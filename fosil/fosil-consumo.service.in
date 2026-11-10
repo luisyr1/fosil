@@ -1,0 +1,9 @@
+[Unit]
+Description=Consumo de las IAs para el widget de inicio
+
+[Service]
+Type=oneshot
+User=@USUARIO@
+Environment=HOME=@HOME@
+ExecStart=/usr/local/bin/fosil-consumo
+Nice=15

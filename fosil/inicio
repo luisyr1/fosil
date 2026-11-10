@@ -1,0 +1,3 @@
+#!/bin/sh
+# Vuelve de la terminal a Fósil.
+if [ -p /run/fosil/volver ]; then echo > /run/fosil/volver; else echo "Fósil no está esperando" >&2; fi

@@ -1,0 +1,67 @@
+#!/bin/sh
+# Propone cambios de ~/fosil como un PR en el repositorio público.
+# Uso: fosil-proponer "título" ["descripción"] [commit...]
+# Sin commits, propone todos los cambios locales desde la versión instalada.
+# Todo lo que sube es PÚBLICO: antes busca secretos y las palabras de /etc/fosil/prohibidas.txt.
+# Los commits propuestos salen de la copia local hasta que lleguen en una versión.
+. "${FOSIL_COMUN:-/usr/local/lib/fosil/comun.sh}"
+[ -n "${1:-}" ] || { echo "Uso: fosil-proponer \"título\" [\"descripción\"] [commit...]" >&2; exit 2; }
+titulo=$1; desc=${2:-}; [ $# -ge 2 ] && shift 2 || shift 1
+L=$HOME_U/fosil
+[ -n "$FORK" ] && gh auth status >/dev/null 2>&1 || { echo "Falta configurar FORK y gh auth login" >&2; exit 2; }
+# Sin lista de palabras ni gitleaks no hay revisión de privacidad: no se propone nada.
+PROHIBIDAS=$FOSIL_ETC/prohibidas.txt; GL=${GITLEAKS:-gitleaks}
+[ -r "$PROHIBIDAS" ] && grep -v '^[[:space:]]*#' "$PROHIBIDAS" | grep -q '[^[:space:]]' \
+    || { echo "Falta $PROHIBIDAS con tus datos privados (o no se puede leer): sin ella no se propone nada" >&2; exit 2; }
+command -v "$GL" >/dev/null 2>&1 || { echo "Falta gitleaks (apk add gitleaks): sin él no se propone nada" >&2; exit 2; }
+g() { git -C "$L" -c user.name=fosil -c user.email="$AUTOR_EMAIL" -c commit.gpgsign=false "$@"; }
+slug() { printf '%s' "$1" | sed 's/\.git$//; s|/*$||' | awk -F'[/:]' '{print $(NF-1) "/" $NF}'; }
+
+base=v$(cat "$FOSIL_VAR/version" 2>/dev/null || echo 0.0.0)
+g rev-parse -q --verify "refs/tags/$base" >/dev/null || { echo "No encuentro la versión instalada $base en ~/fosil" >&2; exit 1; }
+[ "$(g symbolic-ref -q --short HEAD)" = main ] || { echo "~/fosil no está en main" >&2; exit 1; }
+g add -A; g diff --cached --quiet || g commit -q -m "$titulo"
+orig=$(g rev-parse main)
+if [ $# -gt 0 ]; then lista=$(for c in "$@"; do g rev-parse --verify "$c^{commit}" || exit 1; done) || { echo "Commit no válido" >&2; exit 1; }
+else lista=$(g rev-list --reverse "$base..main"); fi
+[ -n "$lista" ] || { echo "No hay cambios que proponer" >&2; exit 1; }
+
+# Rama desde el main público con los commits elegidos.
+g fetch -q --no-tags "$REPO" main || { echo "No se pudo bajar el main de $REPO" >&2; exit 1; }
+publico=$(g rev-parse FETCH_HEAD)
+rama=propuesta/$(date +%Y%m%d)-$(printf '%s' "$titulo" | tr 'A-Z ' 'a-z-' | tr -cd 'a-z0-9-' | cut -c1-40)
+while g rev-parse -q --verify "refs/heads/$rama" >/dev/null; do rama=$rama-2; done
+vuelve() { g checkout -q main; }
+g checkout -q -b "$rama" "$publico" || exit 1
+for c in $lista; do
+    g cherry-pick "$c" >/dev/null 2>&1 || { g cherry-pick --abort 2>/dev/null; vuelve; g branch -q -D "$rama"; echo "El commit $c choca con el main público: actualiza primero" >&2; exit 1; }
+done
+
+# Privacidad: líneas añadidas, autores y mensajes; y gitleaks si está.
+pat=$(mktemp) || exit 1; trap 'rm -f "$pat"' EXIT
+grep -v '^[[:space:]]*#' "$PROHIBIDAS" | grep -v '^[[:space:]]*$' > "$pat"
+# Y lo que el propio móvil sabe de su dueño: nombre del equipo, usuario, redes Wi-Fi e IPs.
+{ hostname 2>/dev/null; printf '%s\n' "$USUARIO" "$HOME_U"; LC_ALL=C nmcli -t -f NAME connection show 2>/dev/null
+  ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1; tailscale ip 2>/dev/null; } \
+  | awk 'length($0) >= 4 && $0 != "localhost" && $0 !~ /^(127\.|::1$|fe80:)/' >> "$pat"
+malo=$( { g diff "$publico..HEAD" | grep '^+' ; g log --format='%an <%ae> %cn <%ce> %B' "$publico..HEAD"; } | grep -i -F -f "$pat" | cut -c1-160)
+"$GL" git --log-opts="$publico..HEAD" --redact --no-banner "$L" >/dev/null 2>&1 || malo="$malo
+gitleaks ha encontrado un secreto (ejecuta: gitleaks git --log-opts=$publico..HEAD $L)"
+if [ -n "$malo" ]; then
+    vuelve; g branch -q -D "$rama"
+    printf 'No se sube nada. Hay datos que no pueden ser públicos:\n%s\n' "$malo" >&2; exit 1
+fi
+
+g push -q "$FORK" "$rama" || { vuelve; echo "No se pudo subir la rama al fork" >&2; exit 1; }
+cuerpo=$(printf '%s\n\nPropuesto desde un móvil con Fósil (fosil-proponer).' "$desc")
+url=$(gh pr create --repo "$(slug "$REPO")" --head "$(slug "$FORK" | cut -d/ -f1):$rama" --base main --title "$titulo" --body "$cuerpo") || { vuelve; echo "Rama subida, pero no se pudo abrir el PR" >&2; exit 1; }
+vuelve
+
+# Saca de main lo propuesto: main = versión instalada + lo no propuesto.
+resto=$(g rev-list --reverse "$base..$orig" | grep -vxF "$lista")
+g reset -q --hard "$base"
+for c in $resto; do
+    g cherry-pick "$c" >/dev/null 2>&1 || { g cherry-pick --abort 2>/dev/null; g reset -q --hard "$orig"; echo "PR abierto, pero no pude quitar los commits propuestos de main" >&2; break; }
+done
+fosil-avisa "PR abierto: $url" proponer
+echo "$url"

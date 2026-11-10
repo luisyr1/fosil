@@ -1,0 +1,26 @@
+Audio directo sin módem para el Moto E 2015 (surnia).
+Generar: sudo python3 preparar.py /var/lib/fosil/audio, y copiar
+surnia-audio.dtb a /boot/msm8916-surnia-audio.dtb y extlinux.audio.conf
+a /boot/extlinux/extlinux.conf. Tras cambiar de kernel lo rehace despues-kernel.
+Se conserva /boot/msm8916-motorola-surnia.dtb sin modificaciones.
+Nuevo DTB /boot/msm8916-surnia-audio.dtb: LPASS habilitado,
+sound compatible apq8016-sbc, enlaces WCD playback y capture,
+remoteproc del módem desactivado. No se han grabado dispositivos
+ni particiones en bruto ni cambiado el gestor lk2nd.
+Extlinux contiene las opciones audio-directo (predeterminada)
+y postmarketOS (original). El menú espera cinco segundos.
+Al arrancar, fosil-audio.service configura UCM Speaker, volumen
+RX3=72 y prueba el callback ALSA de la app con las dos pistas.
+El resultado se guarda en /var/lib/fosil/audio/resultado.log y publica un aviso.
+Si no aparece la tarjeta, restaura el extlinux original para el
+siguiente arranque. No reinicia de nuevo automáticamente.
+
+Volver al arranque anterior:
+sudo cp /var/lib/fosil/audio/extlinux.original.conf /boot/extlinux/extlinux.conf
+sudo systemctl disable fosil-audio.service
+sudo reboot
+
+Referencias técnicas:
+https://raw.githubusercontent.com/torvalds/linux/v6.12/arch/arm64/boot/dts/qcom/apq8016-sbc.dts
+https://raw.githubusercontent.com/torvalds/linux/v6.12/sound/soc/qcom/apq8016_sbc.c
+https://raw.githubusercontent.com/torvalds/linux/v6.12/sound/soc/qcom/lpass-cpu.c

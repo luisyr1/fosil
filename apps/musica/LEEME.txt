@@ -1,0 +1,16 @@
+Música lofi para Fósil
+Abre Creaciones > Música lofi. Toca una pista y Reproducir.
+Controles: pausa, anterior/siguiente, barra de posición y volumen.
+Salir o Bajar volumen vuelve a Fósil. Reproduce las dos pistas en bucle.
+
+Pistas originales sintetizadas localmente, sin descargas ni conexión:
+Café de noche: 78 BPM, 1:38.
+Lluvia lenta: 72 BPM, 1:46.
+Fuente y generador incluidos. WAV mono PCM16, 22050 Hz.
+
+Audio (2026-11-08): suena por ALSA (altavoz hw:0,1, dmix S16_LE 48 kHz).
+SDL no abre 22050 Hz en este móvil, así que la app convierte cada
+pista a 48 kHz estéreo al cargarla.
+
+Compilar: make
+Comprobar pistas: SDL_AUDIODRIVER=dummy ./musica --test

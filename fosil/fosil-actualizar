@@ -1,0 +1,219 @@
+#!/bin/sh
+# Actualizaciones de Fósil: versiones firmadas del repositorio público y paquetes de Linux.
+# Uso: fosil-actualizar comprobar | instalar | linux | confirmar vX.Y.Z
+. "${FOSIL_COMUN:-/usr/local/lib/fosil/comun.sh}"
+D=$FOSIL_VAR/actualizar
+
+# version_mayor A B: 0 si A > B (semver numérico X.Y.Z).
+version_mayor() {
+    awk -v a="$1" -v b="$2" 'BEGIN { split(a, x, "."); split(b, y, ".");
+        for (i = 1; i <= 3; i++) { if (x[i] + 0 > y[i] + 0) exit 0; if (x[i] + 0 < y[i] + 0) exit 1 } exit 1 }'
+}
+
+# ultima_etiqueta: la vX.Y.Z más alta del repositorio público.
+ultima_etiqueta() {
+    _m=
+    for _t in $(git ls-remote --tags --refs "$REPO" | sed -n 's|.*refs/tags/\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p'); do
+        if [ -z "$_m" ] || version_mayor "${_t#v}" "${_m#v}"; then _m=$_t; fi
+    done
+    [ -n "$_m" ] && printf '%s\n' "$_m"
+}
+
+# verificar_etiqueta DIR vX: etiqueta anotada, con ese mismo nombre dentro y firmada por alguien de firmantes.
+# Como el usuario: git no trabaja como root en un repo de otro (y root no debe obedecer su .git/config).
+verificar_etiqueta() {
+    [ "$(como_usuario git -C "$1" cat-file -t "refs/tags/$2" 2>/dev/null)" = tag ] || return 1
+    [ "$(como_usuario git -C "$1" cat-file tag "refs/tags/$2" | sed -n 's/^tag //p' | head -1)" = "$2" ] || return 1
+    como_usuario git -C "$1" -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$FOSIL_ETC/firmantes" verify-tag "refs/tags/$2" >/dev/null 2>&1
+}
+
+# traer_etiqueta vX: baja la etiqueta a la copia del móvil, como el usuario.
+traer_etiqueta() {
+    como_usuario git -C "$HOME_U/fosil" fetch -q --no-tags "$REPO" "refs/tags/$1:refs/tags/$1"
+}
+
+# escribe_disponible VERSION LINUX ERROR
+escribe_disponible() {
+    mkdir -p "$D"
+    printf 'VERSION=%s\nLINUX=%s\nCOMPROBADO=%s\nERROR=%s\n' "$1" "$2" "$(date +%s)" "$3" > "$D/disponible.tmp" && mv -f "$D/disponible.tmp" "$D/disponible"
+}
+
+paquetes_linux() {
+    apk update -q >/dev/null 2>&1
+    apk version -l '<' 2>/dev/null | tail -n +2 | grep -c .
+}
+
+comprobar() {
+    [ -d "$FOSIL_RUN/actualizar.lock" ] && [ -z "${DENTRO_DEL_BLOQUEO:-}" ] && return 0   # hay una instalación en marcha
+    _inst=$(cat "$FOSIL_VAR/version" 2>/dev/null || echo 0.0.0)
+    _ver=; _err=
+    if [ -z "$REPO" ]; then
+        _err="Falta el repositorio de actualizaciones (REPO en /etc/fosil/fosil.conf)"
+    elif ! _ult=$(ultima_etiqueta); then
+        git ls-remote --tags --refs "$REPO" >/dev/null 2>&1 || _err="No se pudo consultar el repositorio"
+    elif version_mayor "${_ult#v}" "$_inst"; then
+        if traer_etiqueta "$_ult" && verificar_etiqueta "$HOME_U/fosil" "$_ult"; then
+            _ver=${_ult#v}; mkdir -p "$D"
+            como_usuario git -C "$HOME_U/fosil" tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$_ult" > "$D/notas"
+        else
+            _err="Versión $_ult sin firma válida: no se instala"
+            fosil-avisa "$_err" actualizaciones
+        fi
+    fi
+    escribe_disponible "$_ver" "$(paquetes_linux)" "$_err"
+}
+
+# ---- Instalar ----
+R=${FOSIL_RAIZ:-/}; R=${R%/}
+L=$HOME_U/fosil
+
+estado() { mkdir -p "$D"; printf '%s|%s\n' "$1" "$2" > "$D/estado.tmp" && mv -f "$D/estado.tmp" "$D/estado"; echo "[$1] $2"; }
+# fallo TEXTO: deja el error, avisa y, si ya se tocó la copia del móvil, la devuelve a como estaba.
+fallo() { [ "${RESTAURAR:-0}" = 1 ] && restaurar_copia; estado error "$1"; fosil-avisa "$1" actualizaciones; exit 1; }
+
+bloquear() {
+    mkdir -p "$FOSIL_RUN"
+    mkdir "$FOSIL_RUN/actualizar.lock" 2>/dev/null || { echo "Ya hay una actualización en marcha" >&2; exit 1; }
+    trap 'rmdir "$FOSIL_RUN/actualizar.lock" 2>/dev/null' EXIT
+    trap 'exit 1' INT TERM
+    mkdir -p "$D"; exec >> "$D/ultimo.log" 2>&1; echo "== $(date) $1"
+}
+
+esperar_chat() {
+    while :; do
+        case "$(cat "$FOSIL_VAR/chat/estado" 2>/dev/null)" in listo*|'') return ;; esac
+        estado esperando "Esperando a que el agente termine"; sleep "${FOSIL_ESPERA_CHAT:-5}"
+    done
+}
+
+comprobaciones() {
+    _b=$(fosil_perfil BATERIA '')
+    if [ -z "$_b" ]; then for _x in /sys/class/power_supply/*; do [ "$(cat "$_x/type" 2>/dev/null)" = Battery ] && { _b=$_x; break; }; done; fi
+    if [ -n "$_b" ] && [ -r "$_b/capacity" ]; then
+        case "$(cat "$_b/status" 2>/dev/null)" in Charging|Full) ;; *) [ "$(cat "$_b/capacity")" -ge 30 ] || fallo "Falta batería: carga el móvil o llega al 30 %" ;; esac
+    fi
+    [ "$(df -Pm / | awk 'NR==2{print $4}')" -ge 300 ] || fallo "Faltan 300 MB libres en el disco"
+    LC_ALL=C nmcli -t -f TYPE,STATE dev 2>/dev/null | grep -q '^wifi:connected' || fallo "Conecta la Wi-Fi para actualizar"
+}
+
+# git como el usuario, con identidad para los commits locales.
+g() { como_usuario git -C "$L" -c user.name=fosil -c user.email="$AUTOR_EMAIL" -c commit.gpgsign=false "$@"; }
+
+# Deja la copia como estaba antes de los cambios locales (sin perder lo que no tenía commit).
+restaurar_copia() { [ -n "${PRE:-}" ] && g reset -q --hard "$PRE"; [ -n "${ORIG:-}" ] && g reset -q "$ORIG"; }
+
+aplicar_cambios_locales() {   # aplicar_cambios_locales vVIEJA vNUEVA
+    chown -R -h "$USUARIO:" "$L"
+    ORIG=$(g rev-parse HEAD); PRE=
+    [ "$(g symbolic-ref -q --short HEAD)" = main ] || g checkout -q -B main
+    g add -A
+    g diff --cached --quiet || g commit -q -m "Cambios locales del móvil"
+    PRE=$(g rev-parse HEAD)
+    if ! g rebase -q --onto "$2" "$1" main; then
+        g rebase --abort; PRE=; g reset -q "$ORIG"
+        fallo "Hay cambios locales que chocan con $2: no se ha actualizado"
+    fi
+}
+
+# compilar [-B]: Fósil y las apps del repo que tengan Makefile.
+compilar() {
+    como_usuario make "$@" -C "$L/fosil" >/dev/null || return 1
+    for _m in "$L"/apps/*/Makefile; do
+        [ -f "$_m" ] || continue
+        como_usuario make "$@" -C "${_m%/Makefile}" >/dev/null || { echo "No compila la app ${_m%/Makefile}" >&2; return 1; }
+    done
+}
+
+actualizar_linux() {   # devuelve 0; marca REINICIAR y si hubo paquetes
+    _kp=$(fosil_perfil KERNEL_PAQUETE '')
+    _dir=$(dirname "$FOSIL_PERFIL")
+    _pend=$(apk version -l '<' 2>/dev/null | tail -n +2)
+    _kver() { apk info -v 2>/dev/null | grep "^$_kp-[0-9]" | head -1; }
+    _k1=; [ -n "$_kp" ] && _k1=$(_kver)
+    if [ -n "$_kp" ] && printf '%s\n' "$_pend" | grep -q "^$_kp-[0-9]" && [ -x "$_dir/antes-kernel" ]; then
+        "$_dir/antes-kernel" || fallo "No se pudo guardar el arranque antes de cambiar de kernel"
+    fi
+    apk upgrade -q || fallo "Falló la actualización de Linux (apk upgrade)"
+    if [ -n "$_kp" ] && [ "$_k1" != "$(_kver)" ]; then
+        [ -x "$_dir/despues-kernel" ] && "$_dir/despues-kernel"
+        touch "$D/reiniciar"
+    elif [ -z "$_kp" ] && printf '%s\n' "$_pend" | grep -q '^linux-'; then
+        touch "$D/reiniciar"
+    fi
+    [ -n "$_pend" ]
+}
+
+final_hecho() {
+    if [ -e "$D/reiniciar" ]; then estado hecho "Reinicia el móvil para terminar"; else estado hecho "$1"; fi
+}
+
+# volver_estable [reiniciar]: pone fosil.estable como /usr/local/bin/fosil (y reinicia Fósil si se pide).
+volver_estable() {
+    _e=$R/usr/local/bin/fosil.estable
+    [ -e "$_e" ] || return 0
+    cp "$_e" "$R/usr/local/bin/fosil.vuelta" && mv -f "$R/usr/local/bin/fosil.vuelta" "$R/usr/local/bin/fosil"
+    [ -n "${1:-}" ] && systemctl restart fosil
+    return 0
+}
+
+confirmar() {   # confirmar vX: la versión solo se apunta como instalada si sigue viva al cabo del tiempo
+    sleep "${FOSIL_ESPERA_CONFIRMAR:-60}"
+    set -- "$1" $(cat "$FOSIL_RUN/binario" 2>/dev/null)
+    if systemctl is-active -q fosil && [ "$2" = /usr/local/bin/fosil ] && [ $(( $(date +%s) - ${3:-0} )) -ge "${FOSIL_MIN_VIVO:-20}" ]; then
+        echo "${1#v}" > "$FOSIL_VAR/version"
+        cp "$R/usr/local/bin/fosil" "$R/usr/local/bin/fosil.estable.nuevo" && mv -f "$R/usr/local/bin/fosil.estable.nuevo" "$R/usr/local/bin/fosil.estable"
+        escribe_disponible "" "$(paquetes_linux)" ""
+        final_hecho "Actualizado a $1"
+        return 0
+    fi
+    volver_estable reiniciar
+    fallo "La versión $1 ha fallado: se usa la estable"
+}
+
+instalar() {
+    bloquear instalar
+    esperar_chat
+    estado comprobando "Comprobando batería, disco y red"
+    comprobaciones
+    _vieja=v$(cat "$FOSIL_VAR/version" 2>/dev/null || echo 0.0.0)
+    _nueva=$(ultima_etiqueta) || fallo "No se pudo consultar el repositorio"
+    version_mayor "${_nueva#v}" "${_vieja#v}" || { estado hecho "Fósil ya está al día"; return 0; }
+    traer_etiqueta "$_nueva" && verificar_etiqueta "$L" "$_nueva" || fallo "Versión $_nueva sin firma válida: no se instala"
+    traer_etiqueta "$_vieja" 2>/dev/null
+    estado punto "Guardando un punto para volver atrás"
+    fosil-foto crear "Antes de actualizar a $_nueva"
+    estado cambios "Aplicando los cambios del móvil"
+    aplicar_cambios_locales "$_vieja" "$_nueva"
+    RESTAURAR=1
+    estado compilando "Compilando Fósil"
+    compilar || fallo "Fósil $_nueva no compila: no se ha instalado nada"
+    estado linux "Actualizando Linux"
+    rm -f "$D/reiniciar"
+    if actualizar_linux; then compilar -B || fallo "Fósil $_nueva no compila con los paquetes nuevos"; fi
+    estado instalando "Instalando Fósil $_nueva"
+    FOSIL_RAIZ=$R sh "$L/fosil/instalar.sh" "$L" "$L/fosil/fosil" || { volver_estable; fallo "Falló la instalación de $_nueva"; }
+    estado reiniciando "Reiniciando Fósil"
+    systemctl restart fosil
+    confirmar "$_nueva"   # si falla, fallo deja la copia como estaba (RESTAURAR sigue a 1)
+    RESTAURAR=0
+}
+
+solo_linux() {
+    bloquear linux
+    esperar_chat
+    comprobaciones
+    estado linux "Actualizando Linux"
+    rm -f "$D/reiniciar"
+    actualizar_linux
+    DENTRO_DEL_BLOQUEO=1 comprobar
+    final_hecho "Linux al día"
+}
+
+[ -n "${FOSIL_SOLO_FUNCIONES:-}" ] && return 0 2>/dev/null
+case "${1:-}" in
+    comprobar) comprobar ;;
+    instalar) instalar ;;
+    linux) solo_linux ;;
+    confirmar) [ -n "${2:-}" ] || exit 2; bloquear confirmar; confirmar "$2" ;;
+    *) echo "Uso: fosil-actualizar comprobar | instalar | linux | confirmar vX.Y.Z" >&2; exit 2 ;;
+esac

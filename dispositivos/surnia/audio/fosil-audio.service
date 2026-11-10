@@ -1,0 +1,13 @@
+[Unit]
+Description=Configura y comprueba audio directo de Fósil
+After=local-fs.target alsa-restore.service
+ConditionPathExists=/var/lib/fosil/audio/extlinux.original.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/share/fosil/dispositivo/audio/iniciar-audio
+RemainAfterExit=yes
+TimeoutStartSec=45
+
+[Install]
+WantedBy=multi-user.target

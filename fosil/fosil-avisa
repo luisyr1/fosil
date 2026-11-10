@@ -1,0 +1,9 @@
+#!/bin/sh
+# Publica un aviso en el panel Agentes de Fósil.
+# Uso: fosil-avisa "mensaje" [origen]
+[ -n "$1" ] || { echo "Uso: fosil-avisa \"mensaje\" [origen]" >&2; exit 1; }
+f=/var/lib/fosil/feed.log
+linea=$(printf '%s|%s|%s' "$(date +%H:%M)" "${2:-$(whoami)}" "$1" | tr -d '\n' | cut -c1-220)
+printf '%s\n' "$linea" >> "$f"
+n=$(wc -l < "$f"); [ "$n" -gt 200 ] && { tail -n 100 "$f" > "$f.tmp" && cat "$f.tmp" > "$f"; rm -f "$f.tmp"; }
+exit 0

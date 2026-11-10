@@ -1,0 +1,93 @@
+#!/bin/sh
+# Puntos para volver atrás. Guarda /etc, /usr/local y el código del usuario en un git local de root.
+# Uso: fosil-foto crear "texto" | listar | volver <hash>
+# No guarda contraseñas, sudoers, claves SSH ni redes Wi-Fi, para no dejarte fuera al volver.
+. "${FOSIL_COMUN:-/usr/local/lib/fosil/comun.sh}"
+R=$FOSIL_VAR/fotos
+RAIZ=${FOSIL_RAIZ:-/}   # otra raíz solo en las pruebas
+H=${HOME_U#/}  # home del usuario, sin la barra inicial
+GD=$R/.git   # sin exportar: el git del usuario en ~/fosil no debe verlo
+cd "$RAIZ" || exit 1  # las rutas de volver son relativas a la raíz
+g() { git --git-dir="$GD" --work-tree="$RAIZ" -c user.name=fosil -c user.email=fosil@moto-e -c core.fileMode=true -c gc.auto=200 "$@"; }
+iniciar() {
+    [ -d "$GD" ] && return
+    mkdir -p "$R"; chmod 700 "$R"; git init -q "$R"
+    cat > "$GD/info/exclude" <<X
+/*
+!/etc/
+!/usr/
+/usr/*
+!/usr/local/
+!/home/
+/home/*
+!$HOME_U/
+$HOME_U/*
+!$HOME_U/fosil/
+!$HOME_U/taller/
+!$HOME_U/apps/
+/etc/shadow*
+/etc/gshadow*
+/etc/passwd*
+/etc/group*
+/etc/sudoers*
+/etc/NetworkManager/system-connections/
+/etc/ssh/ssh_host_*
+/etc/machine-id
+/etc/.pwd.lock
+*.o
+X
+}
+HU=${RAIZ%/}$HOME_U
+# ~/fosil es un clon de git: root no puede guardarlo como ficheros (sería un gitlink). Se guarda con su
+# propio git, como el usuario: HEAD y un commit con todo el árbol de trabajo, también lo que no tiene commit.
+ug() { como_usuario git -C "$HU/fosil" -c user.name=fosil -c user.email=fosil@localhost -c commit.gpgsign=false "$@"; }
+copia_fosil() {
+    _h=$(ug rev-parse -q --verify HEAD) || return 1
+    _i=$HU/fosil/.git/fosil-foto-index
+    ug -c core.fileMode=true status >/dev/null 2>&1
+    como_usuario cp "$HU/fosil/.git/index" "$_i" 2>/dev/null
+    _t=$(como_usuario env GIT_INDEX_FILE="$_i" git -C "$HU/fosil" add -A >/dev/null 2>&1 && como_usuario env GIT_INDEX_FILE="$_i" git -C "$HU/fosil" write-tree)
+    rm -f "$_i"; [ -n "$_t" ] || return 1
+    _c=$(ug commit-tree -p "$_h" -m "Punto de Fósil" "$_t") || return 1
+    ug update-ref "refs/fosil-fotos/$_c" "$_c"   # que gc no lo borre
+    echo "$_h $_c"
+}
+crear() {
+    iniciar
+    _copia=
+    if [ -d "$HU/fosil/.git" ] && _copia=$(copia_fosil); then
+        g rm -r -q --cached --ignore-unmatch -- "$H/fosil" >/dev/null 2>&1
+        g add -A -- . ":(exclude)$H/fosil"
+    else
+        g add -A
+        if g rev-parse -q --verify HEAD >/dev/null && g diff --cached --quiet; then return 0; fi
+    fi
+    _m=$(printf '%s' "${1:-Punto manual}" | tr '\n|' '  ' | cut -c1-70)
+    if [ -n "$_copia" ]; then g commit -q --allow-empty -m "$_m" -m "Copia: $_copia"; else g commit -q -m "$_m"; fi
+}
+case "$1" in
+    crear) crear "$2" ;;
+    listar) iniciar; g log -n "${2:-8}" --format='%h|%cd|%s' --date=format:'%d/%m %H:%M' 2>/dev/null ;;
+    volver)
+        printf '%s' "$2" | grep -qE '^[0-9a-f]{6,40}$' || { echo "Punto no válido" >&2; exit 2; }
+        g rev-parse -q --verify "$2^{commit}" >/dev/null || { echo "No existe ese punto" >&2; exit 2; }
+        crear "Antes de volver a $2"
+        antes=$(md5sum usr/local/bin/fosil 2>/dev/null)
+        copia=$(g log -1 --format=%b "$2" | sed -n 's/^Copia: //p')
+        rutas=; for _p in etc usr/local "$H/taller" "$H/apps"; do g cat-file -e "$2:$_p" 2>/dev/null && rutas="$rutas $_p"; done
+        [ -z "$copia" ] && g cat-file -e "$2:$H/fosil" 2>/dev/null && rutas="$rutas $H/fosil"
+        # shellcheck disable=SC2086 # rutas sin espacios, una por palabra
+        [ -n "$rutas" ] && g restore --source="$2" --staged --worktree -- $rutas
+        g commit -q -m "Vuelta a $2" 2>/dev/null
+        chown -R -h "$USUARIO:" "$HU/taller" "$HU/apps" 2>/dev/null
+        [ -z "$copia" ] && chown -R -h "$USUARIO:" "$HU/fosil" 2>/dev/null
+        if [ -n "$copia" ]; then   # ~/fosil: su historia y luego sus cambios sin commit, como estaban
+            set -- "$2" $copia
+            ug reset -q --hard "$2" && ug checkout -q "$3" -- . && ug reset -q
+        fi
+        systemctl daemon-reload
+        timeout 120 apk fix -q >/dev/null 2>&1
+        [ "$antes" = "$(md5sum usr/local/bin/fosil 2>/dev/null)" ] || systemd-run --quiet --on-active=2 systemctl restart fosil
+        ;;
+    *) echo "Uso: fosil-foto crear texto | listar | volver hash" >&2; exit 2 ;;
+esac

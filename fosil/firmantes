@@ -1,0 +1,2 @@
+# Llaves que pueden firmar versiones de Fósil (formato allowed_signers de git).
+fosil namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK5NtVJYpjHWq22K/ErQR3aKYdyFuknHsczg4Nb1MiwN

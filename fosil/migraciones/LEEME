@@ -1,0 +1,3 @@
+Migraciones: scripts NNN-nombre.sh que instalar.sh ejecuta una sola vez, en orden, como root.
+Reciben las variables de comun.sh y R (prefijo de la raíz; vacío en el móvil).
+Las hechas se apuntan en $FOSIL_VAR/migraciones-hechas. Deben poder repetirse sin daño.

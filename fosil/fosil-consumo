@@ -1,0 +1,46 @@
+#!/bin/sh
+# Consumo de las IAs para el widget de inicio. Solo lee registros de este móvil.
+# Tokens de hoy: entrada nueva y salida, sin contar lecturas de caché. Límites: los que dio el proveedor en el último uso.
+S=/var/lib/fosil/consumo; T=/var/lib/fosil/consumo.tokens; L=/var/lib/fosil/chat/limites-claude
+ahora=$(date +%s); hoy=$(date +%Y%m%d)
+medianoche=$(( ahora - $(date +%H | sed 's/^0//') * 3600 - $(date +%M | sed 's/^0//') * 60 - $(date +%S | sed 's/^0//') ))
+fmt() { awk -v n="${1:-0}" 'BEGIN { if (n >= 1e6) s = sprintf("%.1f M", n / 1e6); else if (n >= 1e3) s = sprintf("%.0f k", n / 1e3); else s = n; gsub(/\./, ",", s); print s }'; }
+tokens_claude() {
+    find "$HOME/.claude/projects" -name '*.jsonl' -mtime -1 -exec grep -h '"usage"' {} + 2>/dev/null |
+    jq -R -r --argjson t "$medianoche" 'fromjson? | select(.type=="assistant" and .message.usage != null and .message.model != "<synthetic>" and ((.timestamp[0:19]+"Z"|fromdate) >= $t)) |
+        .message.usage as $u | "\(.message.id) \(($u.input_tokens//0)+($u.cache_creation_input_tokens//0)+($u.output_tokens//0))"' |
+    awk '{ if ($2 > m[$1]) m[$1] = $2 } END { for (i in m) s += m[i]; print s + 0 }'
+}
+tokens_codex() {
+    find "$HOME/.codex/sessions" -name '*.jsonl' -mtime -1 2>/dev/null | while read -r f; do
+        grep -h '"token_count"' "$f" | jq -R -r --argjson t "$medianoche" 'fromjson? | select(.payload.info.total_token_usage != null) | .payload.info.total_token_usage as $u |
+            "\(if (.timestamp[0:19]+"Z"|fromdate) >= $t then 1 else 0 end) \(($u.input_tokens//0)-($u.cached_input_tokens//0)+($u.output_tokens//0))"' |
+        awk '$1 == 0 { b = $2 } $1 == 1 { h = $2 } END { if (h > b) print h - b; else print 0 }'
+    done | awk '{ s += $1 } END { print s + 0 }'
+}
+# Recalcular solo si hay registros nuevos o ha cambiado el día.
+if [ "$(head -1 "$T" 2>/dev/null)" != "$hoy" ] || [ -n "$(find "$HOME/.claude/projects" "$HOME/.codex/sessions" -name '*.jsonl' -newer "$T" 2>/dev/null | head -1)" ]; then
+    { echo "$hoy"; tokens_claude; tokens_codex; } > "$T.tmp" && mv "$T.tmp" "$T"
+fi
+tc=$(sed -n 2p "$T"); tx=$(sed -n 3p "$T")
+# "5 h 10 %", vacío si esa ventana ya se reinició y no hay dato nuevo.
+ventana() { [ "${3:-0}" -gt "$ahora" ] && printf '%s %s %%' "$1" "$2"; }
+c5=; c7=; pc=-1
+if [ -s "$L" ]; then
+    set -- $(jq -r '[((.five_hour.utilization // 0) * 100 | round), (.five_hour.resetsAt // 0), ((.seven_day.utilization // 0) * 100 | round), (.seven_day.resetsAt // 0)] | @tsv' "$L" 2>/dev/null)
+    c5=$(ventana "5 h" "$1" "$2"); c7=$(ventana "7 d" "$3" "$4")
+    [ -n "$c5" ] && pc=$1; [ -n "$c7" ] && [ "$3" -gt "$pc" ] && pc=$3
+fi
+xl=; px=-1
+f=$(ls -t $(find "$HOME/.codex/sessions" -name '*.jsonl' 2>/dev/null) 2>/dev/null | head -1)
+if [ -n "$f" ]; then
+    set -- $(grep -h '"rate_limits"' "$f" | tail -1 | jq -r '.payload.rate_limits.primary // empty | [(.used_percent | round), (.window_minutes // 0), (.resets_at // 0)] | @tsv' 2>/dev/null)
+    if [ $# = 3 ]; then
+        case $2 in 10080) e="7 d" ;; 300) e="5 h" ;; *) e="$(( $2 / 60 )) h" ;; esac
+        xl=$(ventana "$e" "$1" "$3"); [ -n "$xl" ] && px=$1
+    fi
+fi
+linea() { printf '%s|%s%shoy %s|%s\n' "$1" "$2" "${2:+ · }" "$(fmt "$3")" "$4"; }
+c=$c5; [ -n "$c5" ] && [ -n "$c7" ] && c="$c5 · $c7" || c="$c5$c7"
+{ linea Claude "$c" "$tc" "$pc"; linea Codex "$xl" "$tx" "$px"; } > "$S.tmp"
+if cmp -s "$S.tmp" "$S"; then rm -f "$S.tmp"; else mv "$S.tmp" "$S"; fi

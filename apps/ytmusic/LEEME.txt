@@ -1,0 +1,20 @@
+YouTube Music nativo para Fósil (2026-11-08)
+Creaciones > YouTube Music. Busca, toca una canción y suena.
+La cola son los resultados; al llegar al final sigue con la radio
+de YouTube Music de esa canción. Bajar volumen o Salir vuelve a Fósil
+(la música se para al salir).
+
+Piezas:
+  ytmusic.c        interfaz SDL2 (teclado propio, lista, reproductor)
+  ytm-servidor.py  búsqueda y radio por la API de YouTube Music;
+                   resuelve el audio con yt-dlp (+ deno para el reto JS)
+  mpv              reproduce por ALSA (/etc/asound.conf -> dmix S16_LE 48 kHz sobre hw:0,1)
+
+Cada canción tarda ~18 s en resolverse (el reto JS de YouTube en este
+procesador). La siguiente se precarga mientras suena la actual.
+
+Compilar: make
+Probar sin pantalla:
+  SDL_VIDEODRIVER=offscreen YTM_BUSCAR="rosalia" YTM_TOCAR=0 \
+  YTM_CAPTURA=/tmp/c.bmp:40 ./ytmusic
+  (YTM_FINAL=1 salta al final de cada canción para probar el avance)

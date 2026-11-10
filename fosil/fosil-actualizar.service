@@ -1,0 +1,10 @@
+[Unit]
+Description=Fósil: instala la versión nueva (Linux y Fósil)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fosil-actualizar instalar
+TimeoutStartSec=infinity
+# Que una actualización a medias no la mate la falta de memoria antes que a otros.
+OOMScoreAdjust=-200

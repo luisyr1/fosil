@@ -1,0 +1,16 @@
+#!/bin/sh
+# Estado del móvil en JSON, para agentes.
+. /usr/local/lib/fosil/comun.sh
+BAT=$(fosil_perfil BATERIA /sys/class/power_supply/battery); TER=$(fosil_perfil TERMICA /sys/class/thermal/thermal_zone0); PAN=$(fosil_perfil PANTALLA card0-DSI-1)
+pct() { cat "$1" 2>/dev/null || echo null; }
+mem=$(awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{printf "%d %d",(t-a)/1024,t/1024}' /proc/meminfo)
+ssid=$(LC_ALL=C nmcli -t -f ACTIVE,SSID dev wifi list --rescan no 2>/dev/null | sed -n 's/^yes://p' | head -1 | sed 's/["\\]//g')
+senal=$(LC_ALL=C nmcli -t -f ACTIVE,SIGNAL dev wifi list --rescan no 2>/dev/null | sed -n 's/^yes://p' | head -1)
+ip=$(ip -4 -o addr show wlan0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+ts=$(tailscale ip -4 2>/dev/null | head -1)
+disco=$(df -m / | awk 'NR==2{print $3, $2}')
+printf '{"hora":"%s","bateria":%s,"memoria_mb":{"usada":%s,"total":%s},"disco_mb":{"usado":%s,"total":%s},"temperatura_c":%s,"carga":"%s","encendido_s":%s,"wifi":{"red":"%s","senal":%s,"ip":"%s"},"tailscale_ip":"%s","pantalla":"%s","fosil":"%s"}\n' \
+    "$(date -Iseconds)" "$(pct "$BAT/capacity")" \
+    ${mem% *} ${mem#* } ${disco% *} ${disco#* } \
+    "$(( $(pct "$TER/temp") / 1000 ))" "$(cut -d' ' -f1 /proc/loadavg)" "$(cut -d. -f1 /proc/uptime)" \
+    "$ssid" "${senal:-null}" "$ip" "$ts" "$(cat "/sys/class/drm/$PAN/dpms" 2>/dev/null)" "$(systemctl is-active fosil)"

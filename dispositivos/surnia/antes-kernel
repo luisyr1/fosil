@@ -1,0 +1,12 @@
+#!/bin/sh
+# Antes de cambiar de kernel: guarda una copia del arranque actual en /boot/anterior
+# y apunta si el audio directo estaba en uso (el kernel nuevo puede regenerar extlinux.conf).
+. "${FOSIL_COMUN:-/usr/local/lib/fosil/comun.sh}"
+B=${FOSIL_BOOT:-/boot}; A=$FOSIL_VAR/audio
+rm -rf "$B/anterior.tmp"; mkdir -p "$B/anterior.tmp/extlinux" || exit 1
+for f in "$B"/vmlinuz* "$B"/initramfs* "$B"/*.dtb; do [ -f "$f" ] && cp -p "$f" "$B/anterior.tmp/"; done
+cp -p "$B/extlinux/extlinux.conf" "$B/anterior.tmp/extlinux/" || exit 1
+rm -rf "$B/anterior" && mv "$B/anterior.tmp" "$B/anterior" || exit 1
+mkdir -p "$A"
+if grep -q 'audio-directo' "$B/extlinux/extlinux.conf"; then touch "$A/activo"; else rm -f "$A/activo"; fi
+sync

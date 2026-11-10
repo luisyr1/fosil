@@ -1,0 +1,9 @@
+[Unit]
+Description=Fósil: busca versiones nuevas cada 6 horas
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+
+[Install]
+WantedBy=timers.target

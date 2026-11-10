@@ -1,0 +1,25 @@
+[Unit]
+DefaultDependencies=no
+After=local-fs.target
+Wants=systemd-udev-trigger.service
+Conflicts=shutdown.target
+Before=shutdown.target
+Description=Fósil, interfaz del móvil
+After=systemd-udev-trigger.service plymouth-start.service
+Before=network.target
+Conflicts=getty@tty7.service
+ConditionPathExists=!/etc/fosil-desactivado
+
+[Service]
+Environment=SDL_VIDEODRIVER=kmsdrm XDG_RUNTIME_DIR=/run/fosil
+RuntimeDirectory=fosil
+RuntimeDirectoryPreserve=yes
+RuntimeDirectoryMode=0755
+ExecStartPre=-/usr/sbin/plymouth quit --wait
+ExecStart=/usr/local/bin/fosil-sesion
+OOMScoreAdjust=-500
+KillMode=mixed
+TimeoutStopSec=4
+
+[Install]
+WantedBy=sysinit.target

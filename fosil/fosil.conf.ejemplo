@@ -1,0 +1,11 @@
+# Configuración de Fósil. Formato CLAVE=valor; no se ejecuta.
+# Usuario del móvil (por defecto, el que tiene uid 1000).
+#USUARIO=
+# Repositorio público del que llegan las actualizaciones.
+REPO=https://github.com/OWNER/fosil
+# Fork propio para proponer cambios con fosil-proponer (opcional).
+#FORK=https://github.com/TU-CUENTA/fosil
+# Perfil de dispositivos/ (por defecto se detecta con el device tree).
+#DISPOSITIVO=surnia
+# Email de los commits locales.
+#AUTOR_EMAIL=fosil@localhost

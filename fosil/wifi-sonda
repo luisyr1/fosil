@@ -1,0 +1,23 @@
+#!/bin/sh
+# Mide la descarga por Wi-Fi cada 5 minutos y guarda el resultado. Avisa en Fósil si va lenta.
+# Uso: wifi-sonda [repeticiones]
+LOG=/var/lib/fosil/wifi-sonda.log
+URL=http://cdn.alpinelinux.org/edge/community/aarch64/APKINDEX.tar.gz
+n=${1:-14}; i=0; lenta=0
+while [ "$i" -lt "$n" ]; do
+    s=$(date +%s)
+    timeout -s KILL 30 wget -T 28 -q -O /tmp/sonda.bin "$URL"; rc=$?
+    e=$(( $(date +%s) - s )); [ "$e" -lt 1 ] && e=1
+    z=$(stat -c%s /tmp/sonda.bin 2>/dev/null || echo 0); rm -f /tmp/sonda.bin
+    kbs=$(( z / 1024 / e ))
+    ssid=$(LC_ALL=C nmcli -t -f ACTIVE,SSID dev wifi list --rescan no | sed -n 's/^yes://p' | head -1)
+    senal=$(iw dev wlan0 link | sed -n 's/.*signal: //p')
+    echo "$(date +%H:%M) rc=$rc ${e}s ${z}B ${kbs}KB/s señal=$senal red=$ssid" >> "$LOG"
+    if [ "$kbs" -lt 100 ]; then
+        lenta=$((lenta + 1))
+        fosil-avisa "Wi-Fi lento: ${kbs} KB/s en $ssid ($senal)" "sonda Wi-Fi"
+    fi
+    i=$((i + 1))
+    [ "$i" -lt "$n" ] && sleep 290
+done
+fosil-avisa "Sonda Wi-Fi terminada: $lenta de $n medidas lentas" "sonda Wi-Fi"

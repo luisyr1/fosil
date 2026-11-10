@@ -1,0 +1,18 @@
+[Unit]
+Description=Chat de Fósil con Claude Code y Codex
+After=network-online.target
+
+[Service]
+User=@USUARIO@
+WorkingDirectory=@HOME@/taller
+Environment=HOME=@HOME@ PATH=@HOME@/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin LANG=es_ES.UTF-8 DISABLE_AUTOUPDATER=1
+ExecStart=/usr/local/bin/fosil-agente
+Restart=always
+RestartSec=3
+KillMode=control-group
+# Si falta memoria, que caiga antes el agente que la interfaz.
+OOMScoreAdjust=500
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

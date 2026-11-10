@@ -1,0 +1,12 @@
+#!/bin/sh
+# Después de cambiar de kernel: si el audio directo estaba en uso, rehace su DTB
+# a partir del DTB del kernel nuevo y restaura su entrada de arranque.
+. "${FOSIL_COMUN:-/usr/local/lib/fosil/comun.sh}"
+B=${FOSIL_BOOT:-/boot}; A=$FOSIL_VAR/audio
+[ -e "$A/activo" ] || exit 0
+P=$(dirname "$0")/audio/preparar.py
+rm -f "$A/original.dtb" "$A/surnia-audio.dtb"
+# Si el kernel regeneró extlinux.conf, el nuevo es el «original».
+grep -q 'audio-directo' "$B/extlinux/extlinux.conf" || rm -f "$A/extlinux.original.conf"
+FOSIL_BOOT=$B python3 "$P" "$A" || { fosil-avisa "Audio: no se pudo rehacer el DTB para el kernel nuevo" actualizaciones 2>/dev/null; exit 1; }
+cp "$A/surnia-audio.dtb" "$B/msm8916-surnia-audio.dtb" && cp "$A/extlinux.audio.conf" "$B/extlinux/extlinux.conf" && sync

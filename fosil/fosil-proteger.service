@@ -1,0 +1,11 @@
+[Unit]
+Description=Particiones de IMEI y calibración en solo lectura
+After=systemd-udev-settle.service local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/fosil-proteger
+
+[Install]
+WantedBy=multi-user.target

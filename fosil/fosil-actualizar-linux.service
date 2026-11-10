@@ -1,0 +1,8 @@
+[Unit]
+Description=Fósil: actualiza solo los paquetes de Linux
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fosil-actualizar linux
+TimeoutStartSec=infinity
