@@ -52,6 +52,22 @@ static void write_file(const char *path, const char *s) {
     int fd = open(path, O_WRONLY);
     if (fd >= 0) { ssize_t n = write(fd, s, strlen(s)); (void)n; close(fd); }
 }
+// Empujón de CPU mientras se toca la pantalla. En reposo el gobernador deja la CPU al mínimo y, como Fósil
+// solo dibuja cuando hace falta, la carga nunca le parece bastante para subir: el fotograma que responde a un
+// toque tardaba 4 o 5 veces más que a la frecuencia máxima. Al soltar vuelve al mínimo del hardware.
+static void cpu_boost(bool on) {
+    static bool puesto;
+    if (on == puesto) return;
+    puesto = on;
+    for (int i = 0; i < 8; i++) {
+        char p[96], v[24] = ""; snprintf(p, sizeof p, "/sys/devices/system/cpu/cpufreq/policy%d/cpuinfo_%s_freq", i, on ? "max" : "min");
+        int fd = open(p, O_RDONLY); if (fd < 0) continue;
+        ssize_t n = read(fd, v, sizeof v - 1); close(fd); if (n <= 0) continue;
+        v[strcspn(v, "\n")] = 0;
+        snprintf(p, sizeof p, "/sys/devices/system/cpu/cpufreq/policy%d/scaling_min_freq", i); write_file(p, v);
+    }
+}
+static void salir(int c) { cpu_boost(false); _exit(c); }
 static bool read_file(const char *path, char *buf, size_t len) {
     FILE *f = fopen(path, "r");
     if (!f) { buf[0] = 0; return false; }
@@ -124,13 +140,14 @@ static int theme_idx = 0;
 
 // ---------------------------------------------------------------- GPU
 static int W = 540, H = 960;
-static GLuint prog_rect, prog_tex, prog_bg, prog_blit, vbo, bg_tex, bg_fbo;
+static GLuint prog_rect, prog_flat, prog_tex, prog_bg, prog_blit, vbo, bg_tex, bg_fbo;
 static GLint bl_res;
 #define BG_W 135
 #define BG_H 240
 static GLint r_res, r_rect, r_rad, r_c1, r_c2, r_bw, t_res, t_col, b_res, b_t, b_bg, b_g1, b_g2;
 static float OX = 0, OY = 0, GA = 1, TURN = 0, FLX = 0, FLY = 0, FLA = 0;
 static GLint r_turn, t_turn, r_fl, t_fl;
+static GLint f_res, f_rect, f_c1, f_turn, f_fl;
 
 static const char *VS =
     "attribute vec2 a;attribute vec2 u;uniform mediump vec2 res;uniform mediump float k;uniform mediump vec3 fl;varying vec2 p;varying vec2 v;"
@@ -147,6 +164,11 @@ static const char *FS_RECT =
     "if(bw>0.)a*=smoothstep(-.6,.6,s+bw);"
     "float g=clamp((p.y-rect.y+rect.w)/(2.*rect.w),0.,1.);"
     "vec4 c=mix(c1,c2,g);gl_FragColor=vec4(c.rgb,c.a*a);}";
+// Rectángulo liso sin esquinas redondas: lo que más píxeles llena en Metro. Mismo borde suavizado, sin la
+// distancia ni el degradado del sombreador general, que en una GPU pequeña no llegan a 60 fotogramas.
+static const char *FS_FLAT =
+    "precision mediump float;varying vec2 p;uniform vec4 rect;uniform vec4 c1;"
+    "void main(){vec2 d=clamp(rect.zw-abs(p-rect.xy)+.5,0.,1.);gl_FragColor=vec4(c1.rgb,c1.a*d.x*d.y);}";
 static const char *FS_TEX =
     "precision mediump float;varying vec2 v;uniform sampler2D tex;uniform vec4 col;"
     "void main(){gl_FragColor=vec4(col.rgb,col.a*texture2D(tex,v).a);}";
@@ -187,6 +209,9 @@ static GLuint program(const char *fs) {
 static void gpu_init(void) {
     prog_rect = program(FS_RECT); prog_tex = program(FS_TEX); prog_bg = program(FS_BG); prog_blit = program(FS_BLIT);
     bl_res = glGetUniformLocation(prog_blit, "res");
+    prog_flat = program(FS_FLAT);
+    f_res = glGetUniformLocation(prog_flat, "res"); f_rect = glGetUniformLocation(prog_flat, "rect"); f_c1 = glGetUniformLocation(prog_flat, "c1");
+    f_turn = glGetUniformLocation(prog_flat, "k"); f_fl = glGetUniformLocation(prog_flat, "fl");
     r_turn = glGetUniformLocation(prog_rect, "k"); t_turn = glGetUniformLocation(prog_tex, "k");
     r_fl = glGetUniformLocation(prog_rect, "fl"); t_fl = glGetUniformLocation(prog_tex, "fl");
     r_res = glGetUniformLocation(prog_rect, "res"); r_rect = glGetUniformLocation(prog_rect, "rect");
@@ -223,6 +248,14 @@ static void rect_ex(float x, float y, float w, float h, float rad, C a, C b, flo
     if (T.metro) {  // todo plano y en ángulo recto; solo se libran los círculos
         if (fabsf(w - h) > .5f || rad < w / 2 - .5f) rad = 0;
         b = a;
+    }
+    if (rad == 0 && bw == 0 && !memcmp(&a, &b, sizeof a)) {
+        glUseProgram(prog_flat);
+        glUniform2f(f_res, W, H); glUniform1f(f_turn, TURN); glUniform3f(f_fl, FLY, FLA, FLX);
+        glUniform4f(f_rect, x + w / 2, y + h / 2, w / 2, h / 2);
+        glUniform4f(f_c1, a.r, a.g, a.b, a.a * GA);
+        quad(x - 1, y - 1, w + 2, h + 2);
+        return;
     }
     glUseProgram(prog_rect);
     glUniform2f(r_res, W, H); glUniform1f(r_turn, TURN); glUniform3f(r_fl, FLY, FLA, FLX);
@@ -1726,7 +1759,7 @@ static void draw_start(const char *hm, const char *date, const char *tiempo) {
         }
         flip_end();
         if (click) {
-            if (apps[i].s == S_NCOUNT) _exit(EXIT_TERMINAL);
+            if (apps[i].s == S_NCOUNT) salir(EXIT_TERMINAL);
             go(apps[i].s, 1);
         }
     }
@@ -1868,7 +1901,7 @@ static void draw_home(void) {
         icon(apps[i].ic, x + gw / 2, y + gh * .38f, 20, T.accent);
         text(F_SANS, 18, apps[i].name, x + gw / 2, y + gh - 34, T.text, 1);
         if (click) {
-            if (apps[i].s == S_NCOUNT) _exit(EXIT_TERMINAL);
+            if (apps[i].s == S_NCOUNT) salir(EXIT_TERMINAL);
             go(apps[i].s, 1);
         }
     }
@@ -2901,7 +2934,7 @@ static void draw_apps(void) {
         if (c && !app_running) {
             if (aps[i].pantalla) {
                 FILE *f = fopen("/run/fosil/lanzar", "w");
-                if (f) { char q[260]; shquote(q, sizeof q, aps[i].dir); fprintf(f, "cd %s && SDL_VIDEODRIVER=kmsdrm XDG_RUNTIME_DIR=/tmp %s\n", q, aps[i].comando); fclose(f); _exit(43); }
+                if (f) { char q[260]; shquote(q, sizeof q, aps[i].dir); fprintf(f, "cd %s && SDL_VIDEODRIVER=kmsdrm XDG_RUNTIME_DIR=/tmp %s\n", q, aps[i].comando); fclose(f); salir(43); }
             } else { toast("Ejecutando %s…", aps[i].nombre); AppE *a = malloc(sizeof(AppE)); *a = aps[i]; app_running = true; pthread_t th; pthread_create(&th, NULL, app_thread, a); pthread_detach(th); }
         }
     }
@@ -3145,7 +3178,7 @@ int main(int argc, char **argv) {
         float last_y = ui.y;
         while (got && !fake_edge) {
             dirty = true;
-            if (e.type == SDL_QUIT) _exit(0);
+            if (e.type == SDL_QUIT) salir(0);
             if (e.type == EV_POWER) {
                 blanked = !blanked;
                 if (blanked) {
@@ -3177,6 +3210,7 @@ int main(int argc, char **argv) {
         }
         (void)last_y;
         t = now_s();
+        cpu_boost(!blanked && (ui.down || t - last_touch < 1 || t - trans_start < TRANS || scrolling || fabsf(scroll_v) > 2 || flip_i >= 0));
         if (blanked && notify_req) { blanked = false; panel_set(true); last_touch = t; dirty = true; }
         if (blanked) continue;
         if (ui.release) scrolling = false;
