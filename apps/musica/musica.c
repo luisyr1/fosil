@@ -8,13 +8,14 @@ static SDL_Renderer*r;static TTF_Font*font,*big;static SDL_AudioDeviceID dev;sta
 static Uint8*pcm;static Uint32 len,pos;static int playing=0,track=0,volume=45;static char error[180];
 static const char*titles[]={"Café de noche","Lluvia lenta"};
 static const char*files[]={"pistas/01-cafe-de-noche.wav","pistas/02-lluvia-lenta.wav"};
+#define NT (int)(sizeof titles/sizeof*titles)
 static void audio(void*u,Uint8*out,int n){(void)u;memset(out,0,n);if(!playing||!pcm)return;Uint32 left=len-pos;int take=left<(Uint32)n?(int)left:n;SDL_MixAudioFormat(out,pcm+pos,spec.format,take,volume*SDL_MIX_MAXVOLUME/100);pos+=take;if(pos>=len)playing=0;}
 static int load(int idx){if(dev)SDL_CloseAudioDevice(dev);dev=0;if(pcm)SDL_FreeWAV(pcm);pcm=NULL;pos=0;track=idx;playing=0;error[0]=0;if(!SDL_LoadWAV(files[idx],&spec,&pcm,&len)){snprintf(error,sizeof error,"No se pudo leer la pista");return 0;}
 /* ALSA de este móvil no abre 22050 Hz desde SDL: se convierte a 48 kHz estéreo al cargar */
 SDL_AudioCVT cvt;if(SDL_BuildAudioCVT(&cvt,spec.format,spec.channels,spec.freq,AUDIO_S16SYS,2,48000)>0){cvt.len=len;cvt.buf=SDL_malloc((size_t)len*cvt.len_mult);if(cvt.buf){memcpy(cvt.buf,pcm,len);SDL_ConvertAudio(&cvt);SDL_FreeWAV(pcm);pcm=cvt.buf;len=cvt.len_cvt;spec.format=AUDIO_S16SYS;spec.channels=2;spec.freq=48000;}}spec.callback=audio;dev=SDL_OpenAudioDevice(NULL,0,&spec,NULL,0);if(!dev){snprintf(error,sizeof error,"Audio no disponible en este sistema");fprintf(stderr,"Audio: %s\n",SDL_GetError());return 0;}SDL_PauseAudioDevice(dev,0);return 1;}
 static void box(int x,int y,int w,int h,int cr,int cg,int cb){SDL_SetRenderDrawColor(r,cr,cg,cb,255);SDL_Rect a={x,y,w,h};SDL_RenderFillRect(r,&a);}
 static void text(const char*s,int x,int y,int large,int c){SDL_Color col={(c>>16)&255,(c>>8)&255,c&255,255};SDL_Surface*a=TTF_RenderUTF8_Blended(large?big:font,s,col);if(!a)return;SDL_Texture*t=SDL_CreateTextureFromSurface(r,a);SDL_Rect d={x,y,a->w,a->h};SDL_RenderCopy(r,t,NULL,&d);SDL_DestroyTexture(t);SDL_FreeSurface(a);}
-static void tap(int x,int y){if(y<90&&x>390){SDL_Event e={.type=SDL_QUIT};SDL_PushEvent(&e);return;}if(y>490&&y<575){if(x<170){load((track+1)%2);if(dev)playing=1;}else if(x>370){load((track+1)%2);if(dev)playing=1;}else if(dev){SDL_LockAudioDevice(dev);if(pos>=len)pos=0;playing=!playing;SDL_UnlockAudioDevice(dev);}else load(track);}
+static void tap(int x,int y){if(y<90&&x>390){SDL_Event e={.type=SDL_QUIT};SDL_PushEvent(&e);return;}if(y>490&&y<575){if(x<170){load((track+NT-1)%NT);if(dev)playing=1;}else if(x>370){load((track+1)%NT);if(dev)playing=1;}else if(dev){SDL_LockAudioDevice(dev);if(pos>=len)pos=0;playing=!playing;SDL_UnlockAudioDevice(dev);}else load(track);}
 if(y>420&&y<475&&dev){SDL_LockAudioDevice(dev);double f=(x-35)/470.0;if(f<0)f=0;if(f>1)f=1;pos=(Uint32)(len*f);pos-=pos%4;SDL_UnlockAudioDevice(dev);}
 if(y>610&&y<665){if(x<270)volume=volume>5?volume-5:0;else volume=volume<95?volume+5:100;}
 if(y>710&&y<790){load(0);if(dev)playing=1;}if(y>=790&&y<875){load(1);if(dev)playing=1;}}

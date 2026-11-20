@@ -25,6 +25,10 @@
 #include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -477,6 +481,23 @@ static void leer_actualizacion(void) {
     st.upd_linux = lin; st.upd_comprobado = comp; st.upd_estado_t = et; st.upd_lock = lock; st.upd_reiniciar = rein;
     pthread_mutex_unlock(&st.m);
 }
+static bool tiempo_pidiendo;  // con st.m: una sola petición a wttr.in a la vez
+static void *tiempo_thread(void *arg) {
+    (void)arg; char w[32] = ""; FILE *pw = popen("curl -fsS -m 8 'https://wttr.in/?format=%t' 2>/dev/null", "r");
+    if (pw) { if (!fgets(w, sizeof w, pw)) w[0] = 0; pclose(pw); }
+    char *q = w[0] == '+' ? w + 1 : w; q[strcspn(q, "\n")] = 0;
+    pthread_mutex_lock(&st.m);
+    if (strstr(q, "°C") && strcmp(st.tiempo, q)) { snprintf(st.tiempo, sizeof st.tiempo, "%s", q); st.version++; }
+    tiempo_pidiendo = false;
+    pthread_mutex_unlock(&st.m);
+    return NULL;
+}
+static void ip_wifi(char *out, size_t len) {   // IPv4 de wlan0 (antes ip | awk | cut)
+    struct ifaddrs *ia, *a; out[0] = 0; if (getifaddrs(&ia)) return;
+    for (a = ia; a; a = a->ifa_next)
+        if (a->ifa_addr && a->ifa_addr->sa_family == AF_INET && !strcmp(a->ifa_name, "wlan0")) { inet_ntop(AF_INET, &((struct sockaddr_in *)a->ifa_addr)->sin_addr, out, len); break; }
+    freeifaddrs(ia);
+}
 static void *stats_thread(void *arg) {
     (void)arg;
     unsigned long long pidle = 0, ptotal = 0;
@@ -518,10 +539,14 @@ static void *stats_thread(void *arg) {
         { static bool avisada = false;   // aviso una sola vez por descarga
           if (batt >= 0 && batt <= 15 && batt_ma < 0 && !avisada) { avisada = true; int rc = system("/usr/local/bin/fosil-avisa 'Batería baja: conéctalo a un cargador' sistema"); (void)rc; }
           if (batt_ma > 0) avisada = false; }
-        if (tick % 600 == 0) {   // el tiempo, cada media hora
-            char w[32] = ""; FILE *pw = popen("curl -fsS -m 8 'https://wttr.in/?format=%t' 2>/dev/null", "r");
-            if (pw) { if (!fgets(w, sizeof w, pw)) w[0] = 0; pclose(pw); }
-            if (strstr(w, "°C")) { char *q = w[0] == '+' ? w + 1 : w; q[strcspn(q, "\n")] = 0; pthread_mutex_lock(&st.m); snprintf(st.tiempo, sizeof st.tiempo, "%s", q); pthread_mutex_unlock(&st.m); }
+        {   // el tiempo: cada media hora de reloj real; sin dato, cada minuto mientras haya Wi-Fi. En su hilo para no frenar este
+            static double ult = -1e9; struct timespec ts; clock_gettime(CLOCK_BOOTTIME, &ts); double ahora = ts.tv_sec + ts.tv_nsec / 1e9;
+            pthread_mutex_lock(&st.m);
+            bool hay = *st.tiempo, pedir = !tiempo_pidiendo && (hay ? ahora - ult >= 1800 : st.wifi && ahora - ult >= 60);
+            if (pedir) tiempo_pidiendo = true;
+            pthread_mutex_unlock(&st.m);
+            if (pedir) { ult = ahora; pthread_t tt;
+                if (pthread_create(&tt, NULL, tiempo_thread, NULL)) { pthread_mutex_lock(&st.m); tiempo_pidiendo = false; pthread_mutex_unlock(&st.m); } else pthread_detach(tt); }
         }
         snprintf(pth, sizeof pth, "%s/temp", p_ter); read_file(pth, b, sizeof b);
         int temp = atoi(b) / 1000;
@@ -560,7 +585,7 @@ static void *stats_thread(void *arg) {
                 }
                 pclose(p);
             }
-            run_line("ip -4 -o addr show wlan0 2>/dev/null | awk '{print $4}' | cut -d/ -f1", ip, sizeof ip);
+            ip_wifi(ip, sizeof ip);
             run_line("/usr/sbin/tailscale ip -4 2>/dev/null", ts, sizeof ts);
             if (!*ts) { char s[64] = ""; run_line("LC_ALL=C /usr/sbin/tailscale status --peers=false 2>&1 | head -1", s, sizeof s); login = strstr(s, "Logged out") != NULL; }
             pthread_mutex_lock(&st.m);
@@ -569,9 +594,9 @@ static void *stats_thread(void *arg) {
             pthread_mutex_unlock(&st.m);
         }
         if (tick % 20 == 0) {
-            char s[64] = "";
-            run_line("df -m / | awk 'NR==2{print $3,$2}'", s, sizeof s);
-            int a = 0, t = 0; sscanf(s, "%d %d", &a, &t);
+            struct statvfs v; int a = 0, t = 0;   // como df -m /: usado y total en MB, redondeados
+            if (!statvfs("/", &v)) { unsigned long long fr = v.f_frsize ? v.f_frsize : v.f_bsize;
+                t = (int)((v.f_blocks * fr + (1 << 19)) >> 20); a = (int)(((v.f_blocks - v.f_bfree) * fr + (1 << 19)) >> 20); }
             pthread_mutex_lock(&st.m); st.disk_used = a; st.disk_total = t; pthread_mutex_unlock(&st.m);
         }
         tick++;
@@ -771,10 +796,14 @@ static double trans_start = -10; static int trans_dir = 1;
 static double last_touch; static double shake_start = -10;
 static float scroll_y[S_NCOUNT], scroll_v = 0; static bool scrolling = false;
 static float scroll_max = 0;
-static char toast_msg[160]; static double toast_t = -10;
+static char toast_msg[160]; static double toast_t = -10; static pthread_mutex_t toast_m = PTHREAD_MUTEX_INITIALIZER;  // toast() llega también desde hilos
 static void toast(const char *fmt, ...) {
-    va_list a; va_start(a, fmt); vsnprintf(toast_msg, sizeof toast_msg, fmt, a); va_end(a);
-    toast_t = now_s();
+    char b[160]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
+    pthread_mutex_lock(&toast_m); memcpy(toast_msg, b, sizeof b); toast_t = now_s(); pthread_mutex_unlock(&toast_m);
+}
+static double toast_lee(char *msg) {   // copia el aviso (si msg) y devuelve cuándo salió
+    pthread_mutex_lock(&toast_m); double t = toast_t; if (msg) memcpy(msg, toast_msg, sizeof toast_msg); pthread_mutex_unlock(&toast_m);
+    return t;
 }
 static bool kb_open; static void chat_entered(void); static void tareas_entered(void); static void convs_load(void); static void apps_load(void); static void files_load(void);
 static void go(Screen s, int dir) {
@@ -2021,6 +2050,7 @@ static void feed_drop(const char *line) {
     if ((f = fopen(STATE_DIR "/feed.log", "w"))) { fwrite(buf, 1, n, f); fclose(f); }
     free(all); free(buf); read_feed();
 }
+static bool chat_abrir(const char *id);
 static void draw_agents(void) {
     pthread_mutex_lock(&st.m);
     int cnt = st.nfeed; static char f[MAX_FEED][240]; memcpy(f, st.feed, sizeof f);
@@ -2068,7 +2098,7 @@ static void draw_agents(void) {
         if (ui.release && ui.active == id) {
             bool cruz = ui.sx > W - 100 && ui.sy < y + 50 && !ui.dragged;
             if (cruz || ui.x - ui.sx < -140) { feed_drop(f[i]); ui.active = 0; }
-            else if (!ui.dragged && conv && on_row) { char m[48]; snprintf(m, sizeof m, "!abrir %s", conv); chat_send_fw(m); go(S_CHAT, 1); }
+            else if (!ui.dragged && conv && on_row && chat_abrir(conv)) go(S_CHAT, 1);
         }
     }
     glDisable(GL_SCISSOR_TEST);
@@ -2399,6 +2429,12 @@ static bool chat_send(const char *m) {
 static bool chat_send_fw(const char *m) { return chat_send(m); }
 static bool lock_trabajando(void) { pthread_mutex_lock(&ch.m); bool b = ch.busy; pthread_mutex_unlock(&ch.m); return b; }
 static void chat_entered(void) { chat_send("!estado"); }
+// fosil-agente ignora !abrir mientras trabaja: si es otra conversación, no se entra y se avisa.
+static bool chat_abrir(const char *id) {
+    char a[24] = ""; read_file(CHAT_DIR "/actual", a, sizeof a);
+    if (lock_trabajando() && strcmp(a, id)) { toast("Espera a que termine o pulsa Parar"); return false; }
+    char m[48]; snprintf(m, sizeof m, "!abrir %s", id); chat_send_fw(m); return true;
+}
 static void chat_toggle_permisos(void) {
     pthread_mutex_lock(&ch_m_ajustes); bool t = ajustes_total; pthread_mutex_unlock(&ch_m_ajustes);
     if (chat_send(t ? "!permisos limitado" : "!permisos total")) {
@@ -2407,6 +2443,7 @@ static void chat_toggle_permisos(void) {
     }
 }
 static volatile bool notify_req = false; static char notify_who[16];
+static volatile bool convs_req = false;   // chat_thread: «lista» ha cambiado con Chats abierto
 static void tareas_medir(void);
 static void *chat_thread(void *arg) {
     (void)arg; long long sl = -1, se = -1;
@@ -2440,6 +2477,11 @@ static void *chat_thread(void *arg) {
             ch.conocido = *se2 != 0 && strcmp(se2, "?"); ch.sesion = !strcmp(se2, "si"); if (*pe) { ch.total = !strcmp(pe, "total"); pthread_mutex_lock(&ch_m_ajustes); ajustes_total = ch.total; pthread_mutex_unlock(&ch_m_ajustes); }
             pthread_mutex_unlock(&ch.m);
             cambio = true;
+        }
+        if (screen == S_CONVS && !blanked && !stat(CHAT_DIR "/lista", &a)) {   // Chats abierto: recarga la lista cuando el agente la reescribe
+            static long long sv = -1; v = (long long)a.st_mtim.tv_nsec + (long long)a.st_mtime * 7 + (long long)a.st_ino * 1000003LL;
+            if (sv >= 0 && v != sv) { convs_req = true; cambio = true; }
+            sv = v;
         }
         if (cambio) { dirty_req = true; wake(); }
     }
@@ -2643,7 +2685,7 @@ static void draw_chat(void) {
 #define MAX_CONVS 40
 static struct { char id[20], hora[16], titulo[64]; } convs[MAX_CONVS]; static int nconvs;
 static void convs_load(void) {
-    nconvs = 0; FILE *f = fopen(CHAT_DIR "/lista", "r"); if (!f) return;
+    convs_req = false; nconvs = 0; FILE *f = fopen(CHAT_DIR "/lista", "r"); if (!f) return;
     char l[200];
     while (nconvs < MAX_CONVS && fgets(l, sizeof l, f)) {
         l[strcspn(l, "\n")] = 0; char *a = strchr(l, '|'); if (!a) continue; *a++ = 0;
@@ -2653,6 +2695,7 @@ static void convs_load(void) {
     fclose(f);
 }
 static void draw_convs(void) {
+    if (convs_req) convs_load();
     header_to = S_CHAT; header("Chats");
     float start = 122, bottom = H - 24, rowh = 92;
     scroll_area(start, bottom, nconvs * rowh + 10, S_CONVS);
@@ -2667,8 +2710,10 @@ static void draw_convs(void) {
         text(F_MONO, 15, convs[i].hora, 56, y + 50, T.sub, 0);
         text(F_SANS, 26, "×", W - 34 - 35, y + 26, T.sub, 1);
         char m[48];
-        if (c) { snprintf(m, sizeof m, "!abrir %s", convs[i].id); chat_send(m); go(S_CHAT, -1); }
-        if (bx) { snprintf(m, sizeof m, "!borrar %s", convs[i].id); chat_send(m); usleep(150000); convs_load(); }
+        if (c && chat_abrir(convs[i].id)) go(S_CHAT, -1);
+        if (bx && lock_trabajando()) toast("Espera a que termine o pulsa Parar");   // fosil-agente no borra mientras trabaja
+        else if (bx) { snprintf(m, sizeof m, "!borrar %s", convs[i].id);   // se quita ya de la lista; chat_thread la recarga al cambiar «lista»
+            if (chat_send(m)) { memmove(convs + i, convs + i + 1, sizeof convs[0] * (nconvs - i - 1)); nconvs--; break; } }
     }
     glDisable(GL_SCISSOR_TEST);
 }
@@ -3077,7 +3122,7 @@ int main(int argc, char **argv) {
 
     for (;;) {
         double t = now_s();
-        bool anim = (t - trans_start < TRANS) || (t - toast_t < 2.6) || scrolling || fabsf(scroll_v) > 2
+        bool anim = (t - trans_start < TRANS) || (t - toast_lee(NULL) < 2.6) || scrolling || fabsf(scroll_v) > 2
                     || (t - last_touch < AMBIENT && !blanked && !kb_open && !T.metro) || (t - pin_shake < .5) || flip_tick(t) || (kb_open && t - last_touch < .35) || (kb_open && t - kb_open_t < .3) || ui.down
                     || (t - shake_start < .5);
         pthread_mutex_lock(&st.m); if (st.scanning && screen == S_NET) anim = true; pthread_mutex_unlock(&st.m);
@@ -3200,19 +3245,20 @@ int main(int argc, char **argv) {
             draw_screen(screen);
         }
         // Aviso flotante
-        if (t - toast_t < 2.6) {
-            float a = clampf(fminf((t - toast_t) * 6, (2.6f - (t - toast_t)) * 4), 0, 1);
+        char tmsg[160]; double tt = toast_lee(tmsg);
+        if (t - tt < 2.6) {
+            float a = clampf(fminf((t - tt) * 6, (2.6f - (t - tt)) * 4), 0, 1);
             GA = a;
             if (T.metro) {  // franja de aviso a todo lo ancho, como las notificaciones del móvil
                 GA = 1; float ty = (a - 1) * 76;
                 rr(0, ty, W, 76, 0, T.accent);
-                text_fit(F_SANS, 21, toast_msg, 24, ty + 24, W - 48, rgba(1, 1, 1, 1));
+                text_fit(F_SANS, 21, tmsg, 24, ty + 24, W - 48, rgba(1, 1, 1, 1));
             } else {
-            int tw = 0; TTF_SizeUTF8(font(F_SANS, 21), toast_msg, &tw, NULL);
+            int tw = 0; TTF_SizeUTF8(font(F_SANS, 21), tmsg, &tw, NULL);
             float w = tw + 50 > W - 40 ? W - 40 : tw + 50;
             rr(W / 2 - w / 2, 28 + (1 - a) * -20, w, 58, 29, rgba(T.bg[0] * .6f, T.bg[1] * .6f, T.bg[2] * .6f, .95f));
             ring(W / 2 - w / 2, 28 + (1 - a) * -20, w, 58, 29, 1.3f, T.accent);
-            text_fit(F_SANS, 21, toast_msg, W / 2 - w / 2 + 25, 44 + (1 - a) * -20, w - 50, T.text);
+            text_fit(F_SANS, 21, tmsg, W / 2 - w / 2 + 25, 44 + (1 - a) * -20, w - 50, T.text);
             }
             GA = 1;
         }
