@@ -65,8 +65,26 @@ crear() {
     _m=$(printf '%s' "${1:-Punto manual}" | tr '\n|' '  ' | cut -c1-70)
     if [ -n "$_copia" ]; then g commit -q --allow-empty -m "$_m" -m "Copia: $_copia"; else g commit -q -m "$_m"; fi
 }
+# Poda: deja los últimos $MAX puntos y saca de verdad los anteriores. Se corta la historia con el fichero
+# shallow de git (los puntos que quedan conservan su hash) y gc borra lo que ya no se alcanza.
+# Solo cuando sobran más de 10, porque gc es caro; y no desde volver, que podría podar el punto al que vuelve.
+MAX=${FOSIL_FOTOS_MAX:-30}
+podar() {
+    _n=$(g rev-list --count HEAD 2>/dev/null) || return 0
+    [ "$_n" -gt $((MAX + 10)) ] || return 0
+    _corte=$(g rev-parse -q --verify "HEAD~$((MAX - 1))") || return 0
+    if [ -d "$HU/fosil/.git" ]; then   # refs de ~/fosil que solo usaban los puntos que se van
+        _quedan=$(g log --format=%b -n "$MAX" HEAD | sed -n 's/^Copia: [0-9a-f]* //p')
+        g log --format=%b "$_corte^" 2>/dev/null | sed -n 's/^Copia: [0-9a-f]* //p' | while read -r _c; do
+            printf '%s\n' "$_quedan" | grep -qx "$_c" || ug update-ref -d "refs/fosil-fotos/$_c" 2>/dev/null
+        done
+    fi
+    echo "$_corte" > "$GD/shallow"
+    g reflog expire --expire=now --all && g gc -q --prune=now
+    return 0   # si gc falla, el punto ya está creado: se podará la próxima vez
+}
 case "$1" in
-    crear) crear "$2" ;;
+    crear) crear "$2" && podar ;;
     listar) iniciar; g log -n "${2:-8}" --format='%h|%cd|%s' --date=format:'%d/%m %H:%M' 2>/dev/null ;;
     volver)
         printf '%s' "$2" | grep -qE '^[0-9a-f]{6,40}$' || { echo "Punto no válido" >&2; exit 2; }

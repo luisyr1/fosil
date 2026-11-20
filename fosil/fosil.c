@@ -25,6 +25,10 @@
 #include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -48,6 +52,22 @@ static void write_file(const char *path, const char *s) {
     int fd = open(path, O_WRONLY);
     if (fd >= 0) { ssize_t n = write(fd, s, strlen(s)); (void)n; close(fd); }
 }
+// Empujón de CPU mientras se toca la pantalla. En reposo el gobernador deja la CPU al mínimo y, como Fósil
+// solo dibuja cuando hace falta, la carga nunca le parece bastante para subir: el fotograma que responde a un
+// toque tardaba 4 o 5 veces más que a la frecuencia máxima. Al soltar vuelve al mínimo del hardware.
+static void cpu_boost(bool on) {
+    static bool puesto;
+    if (on == puesto) return;
+    puesto = on;
+    for (int i = 0; i < 8; i++) {
+        char p[96], v[24] = ""; snprintf(p, sizeof p, "/sys/devices/system/cpu/cpufreq/policy%d/cpuinfo_%s_freq", i, on ? "max" : "min");
+        int fd = open(p, O_RDONLY); if (fd < 0) continue;
+        ssize_t n = read(fd, v, sizeof v - 1); close(fd); if (n <= 0) continue;
+        v[strcspn(v, "\n")] = 0;
+        snprintf(p, sizeof p, "/sys/devices/system/cpu/cpufreq/policy%d/scaling_min_freq", i); write_file(p, v);
+    }
+}
+static void salir(int c) { cpu_boost(false); _exit(c); }
 static bool read_file(const char *path, char *buf, size_t len) {
     FILE *f = fopen(path, "r");
     if (!f) { buf[0] = 0; return false; }
@@ -120,13 +140,14 @@ static int theme_idx = 0;
 
 // ---------------------------------------------------------------- GPU
 static int W = 540, H = 960;
-static GLuint prog_rect, prog_tex, prog_bg, prog_blit, vbo, bg_tex, bg_fbo;
+static GLuint prog_rect, prog_flat, prog_tex, prog_bg, prog_blit, vbo, bg_tex, bg_fbo;
 static GLint bl_res;
 #define BG_W 135
 #define BG_H 240
 static GLint r_res, r_rect, r_rad, r_c1, r_c2, r_bw, t_res, t_col, b_res, b_t, b_bg, b_g1, b_g2;
 static float OX = 0, OY = 0, GA = 1, TURN = 0, FLX = 0, FLY = 0, FLA = 0;
 static GLint r_turn, t_turn, r_fl, t_fl;
+static GLint f_res, f_rect, f_c1, f_turn, f_fl;
 
 static const char *VS =
     "attribute vec2 a;attribute vec2 u;uniform mediump vec2 res;uniform mediump float k;uniform mediump vec3 fl;varying vec2 p;varying vec2 v;"
@@ -143,6 +164,11 @@ static const char *FS_RECT =
     "if(bw>0.)a*=smoothstep(-.6,.6,s+bw);"
     "float g=clamp((p.y-rect.y+rect.w)/(2.*rect.w),0.,1.);"
     "vec4 c=mix(c1,c2,g);gl_FragColor=vec4(c.rgb,c.a*a);}";
+// Rectángulo liso sin esquinas redondas: lo que más píxeles llena en Metro. Mismo borde suavizado, sin la
+// distancia ni el degradado del sombreador general, que en una GPU pequeña no llegan a 60 fotogramas.
+static const char *FS_FLAT =
+    "precision mediump float;varying vec2 p;uniform vec4 rect;uniform vec4 c1;"
+    "void main(){vec2 d=clamp(rect.zw-abs(p-rect.xy)+.5,0.,1.);gl_FragColor=vec4(c1.rgb,c1.a*d.x*d.y);}";
 static const char *FS_TEX =
     "precision mediump float;varying vec2 v;uniform sampler2D tex;uniform vec4 col;"
     "void main(){gl_FragColor=vec4(col.rgb,col.a*texture2D(tex,v).a);}";
@@ -183,6 +209,9 @@ static GLuint program(const char *fs) {
 static void gpu_init(void) {
     prog_rect = program(FS_RECT); prog_tex = program(FS_TEX); prog_bg = program(FS_BG); prog_blit = program(FS_BLIT);
     bl_res = glGetUniformLocation(prog_blit, "res");
+    prog_flat = program(FS_FLAT);
+    f_res = glGetUniformLocation(prog_flat, "res"); f_rect = glGetUniformLocation(prog_flat, "rect"); f_c1 = glGetUniformLocation(prog_flat, "c1");
+    f_turn = glGetUniformLocation(prog_flat, "k"); f_fl = glGetUniformLocation(prog_flat, "fl");
     r_turn = glGetUniformLocation(prog_rect, "k"); t_turn = glGetUniformLocation(prog_tex, "k");
     r_fl = glGetUniformLocation(prog_rect, "fl"); t_fl = glGetUniformLocation(prog_tex, "fl");
     r_res = glGetUniformLocation(prog_rect, "res"); r_rect = glGetUniformLocation(prog_rect, "rect");
@@ -219,6 +248,14 @@ static void rect_ex(float x, float y, float w, float h, float rad, C a, C b, flo
     if (T.metro) {  // todo plano y en ángulo recto; solo se libran los círculos
         if (fabsf(w - h) > .5f || rad < w / 2 - .5f) rad = 0;
         b = a;
+    }
+    if (rad == 0 && bw == 0 && !memcmp(&a, &b, sizeof a)) {
+        glUseProgram(prog_flat);
+        glUniform2f(f_res, W, H); glUniform1f(f_turn, TURN); glUniform3f(f_fl, FLY, FLA, FLX);
+        glUniform4f(f_rect, x + w / 2, y + h / 2, w / 2, h / 2);
+        glUniform4f(f_c1, a.r, a.g, a.b, a.a * GA);
+        quad(x - 1, y - 1, w + 2, h + 2);
+        return;
     }
     glUseProgram(prog_rect);
     glUniform2f(r_res, W, H); glUniform1f(r_turn, TURN); glUniform3f(r_fl, FLY, FLA, FLX);
@@ -477,6 +514,23 @@ static void leer_actualizacion(void) {
     st.upd_linux = lin; st.upd_comprobado = comp; st.upd_estado_t = et; st.upd_lock = lock; st.upd_reiniciar = rein;
     pthread_mutex_unlock(&st.m);
 }
+static bool tiempo_pidiendo;  // con st.m: una sola petición a wttr.in a la vez
+static void *tiempo_thread(void *arg) {
+    (void)arg; char w[32] = ""; FILE *pw = popen("curl -fsS -m 8 'https://wttr.in/?format=%t' 2>/dev/null", "r");
+    if (pw) { if (!fgets(w, sizeof w, pw)) w[0] = 0; pclose(pw); }
+    char *q = w[0] == '+' ? w + 1 : w; q[strcspn(q, "\n")] = 0;
+    pthread_mutex_lock(&st.m);
+    if (strstr(q, "°C") && strcmp(st.tiempo, q)) { snprintf(st.tiempo, sizeof st.tiempo, "%s", q); st.version++; }
+    tiempo_pidiendo = false;
+    pthread_mutex_unlock(&st.m);
+    return NULL;
+}
+static void ip_wifi(char *out, size_t len) {   // IPv4 de wlan0 (antes ip | awk | cut)
+    struct ifaddrs *ia, *a; out[0] = 0; if (getifaddrs(&ia)) return;
+    for (a = ia; a; a = a->ifa_next)
+        if (a->ifa_addr && a->ifa_addr->sa_family == AF_INET && !strcmp(a->ifa_name, "wlan0")) { inet_ntop(AF_INET, &((struct sockaddr_in *)a->ifa_addr)->sin_addr, out, len); break; }
+    freeifaddrs(ia);
+}
 static void *stats_thread(void *arg) {
     (void)arg;
     unsigned long long pidle = 0, ptotal = 0;
@@ -518,10 +572,14 @@ static void *stats_thread(void *arg) {
         { static bool avisada = false;   // aviso una sola vez por descarga
           if (batt >= 0 && batt <= 15 && batt_ma < 0 && !avisada) { avisada = true; int rc = system("/usr/local/bin/fosil-avisa 'Batería baja: conéctalo a un cargador' sistema"); (void)rc; }
           if (batt_ma > 0) avisada = false; }
-        if (tick % 600 == 0) {   // el tiempo, cada media hora
-            char w[32] = ""; FILE *pw = popen("curl -fsS -m 8 'https://wttr.in/?format=%t' 2>/dev/null", "r");
-            if (pw) { if (!fgets(w, sizeof w, pw)) w[0] = 0; pclose(pw); }
-            if (strstr(w, "°C")) { char *q = w[0] == '+' ? w + 1 : w; q[strcspn(q, "\n")] = 0; pthread_mutex_lock(&st.m); snprintf(st.tiempo, sizeof st.tiempo, "%s", q); pthread_mutex_unlock(&st.m); }
+        {   // el tiempo: cada media hora de reloj real; sin dato, cada minuto mientras haya Wi-Fi. En su hilo para no frenar este
+            static double ult = -1e9; struct timespec ts; clock_gettime(CLOCK_BOOTTIME, &ts); double ahora = ts.tv_sec + ts.tv_nsec / 1e9;
+            pthread_mutex_lock(&st.m);
+            bool hay = *st.tiempo, pedir = !tiempo_pidiendo && (hay ? ahora - ult >= 1800 : st.wifi && ahora - ult >= 60);
+            if (pedir) tiempo_pidiendo = true;
+            pthread_mutex_unlock(&st.m);
+            if (pedir) { ult = ahora; pthread_t tt;
+                if (pthread_create(&tt, NULL, tiempo_thread, NULL)) { pthread_mutex_lock(&st.m); tiempo_pidiendo = false; pthread_mutex_unlock(&st.m); } else pthread_detach(tt); }
         }
         snprintf(pth, sizeof pth, "%s/temp", p_ter); read_file(pth, b, sizeof b);
         int temp = atoi(b) / 1000;
@@ -560,7 +618,7 @@ static void *stats_thread(void *arg) {
                 }
                 pclose(p);
             }
-            run_line("ip -4 -o addr show wlan0 2>/dev/null | awk '{print $4}' | cut -d/ -f1", ip, sizeof ip);
+            ip_wifi(ip, sizeof ip);
             run_line("/usr/sbin/tailscale ip -4 2>/dev/null", ts, sizeof ts);
             if (!*ts) { char s[64] = ""; run_line("LC_ALL=C /usr/sbin/tailscale status --peers=false 2>&1 | head -1", s, sizeof s); login = strstr(s, "Logged out") != NULL; }
             pthread_mutex_lock(&st.m);
@@ -569,9 +627,9 @@ static void *stats_thread(void *arg) {
             pthread_mutex_unlock(&st.m);
         }
         if (tick % 20 == 0) {
-            char s[64] = "";
-            run_line("df -m / | awk 'NR==2{print $3,$2}'", s, sizeof s);
-            int a = 0, t = 0; sscanf(s, "%d %d", &a, &t);
+            struct statvfs v; int a = 0, t = 0;   // como df -m /: usado y total en MB, redondeados
+            if (!statvfs("/", &v)) { unsigned long long fr = v.f_frsize ? v.f_frsize : v.f_bsize;
+                t = (int)((v.f_blocks * fr + (1 << 19)) >> 20); a = (int)(((v.f_blocks - v.f_bfree) * fr + (1 << 19)) >> 20); }
             pthread_mutex_lock(&st.m); st.disk_used = a; st.disk_total = t; pthread_mutex_unlock(&st.m);
         }
         tick++;
@@ -771,10 +829,14 @@ static double trans_start = -10; static int trans_dir = 1;
 static double last_touch; static double shake_start = -10;
 static float scroll_y[S_NCOUNT], scroll_v = 0; static bool scrolling = false;
 static float scroll_max = 0;
-static char toast_msg[160]; static double toast_t = -10;
+static char toast_msg[160]; static double toast_t = -10; static pthread_mutex_t toast_m = PTHREAD_MUTEX_INITIALIZER;  // toast() llega también desde hilos
 static void toast(const char *fmt, ...) {
-    va_list a; va_start(a, fmt); vsnprintf(toast_msg, sizeof toast_msg, fmt, a); va_end(a);
-    toast_t = now_s();
+    char b[160]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
+    pthread_mutex_lock(&toast_m); memcpy(toast_msg, b, sizeof b); toast_t = now_s(); pthread_mutex_unlock(&toast_m);
+}
+static double toast_lee(char *msg) {   // copia el aviso (si msg) y devuelve cuándo salió
+    pthread_mutex_lock(&toast_m); double t = toast_t; if (msg) memcpy(msg, toast_msg, sizeof toast_msg); pthread_mutex_unlock(&toast_m);
+    return t;
 }
 static bool kb_open; static void chat_entered(void); static void tareas_entered(void); static void convs_load(void); static void apps_load(void); static void files_load(void);
 static void go(Screen s, int dir) {
@@ -1697,7 +1759,7 @@ static void draw_start(const char *hm, const char *date, const char *tiempo) {
         }
         flip_end();
         if (click) {
-            if (apps[i].s == S_NCOUNT) _exit(EXIT_TERMINAL);
+            if (apps[i].s == S_NCOUNT) salir(EXIT_TERMINAL);
             go(apps[i].s, 1);
         }
     }
@@ -1839,7 +1901,7 @@ static void draw_home(void) {
         icon(apps[i].ic, x + gw / 2, y + gh * .38f, 20, T.accent);
         text(F_SANS, 18, apps[i].name, x + gw / 2, y + gh - 34, T.text, 1);
         if (click) {
-            if (apps[i].s == S_NCOUNT) _exit(EXIT_TERMINAL);
+            if (apps[i].s == S_NCOUNT) salir(EXIT_TERMINAL);
             go(apps[i].s, 1);
         }
     }
@@ -2021,6 +2083,7 @@ static void feed_drop(const char *line) {
     if ((f = fopen(STATE_DIR "/feed.log", "w"))) { fwrite(buf, 1, n, f); fclose(f); }
     free(all); free(buf); read_feed();
 }
+static bool chat_abrir(const char *id);
 static void draw_agents(void) {
     pthread_mutex_lock(&st.m);
     int cnt = st.nfeed; static char f[MAX_FEED][240]; memcpy(f, st.feed, sizeof f);
@@ -2068,7 +2131,7 @@ static void draw_agents(void) {
         if (ui.release && ui.active == id) {
             bool cruz = ui.sx > W - 100 && ui.sy < y + 50 && !ui.dragged;
             if (cruz || ui.x - ui.sx < -140) { feed_drop(f[i]); ui.active = 0; }
-            else if (!ui.dragged && conv && on_row) { char m[48]; snprintf(m, sizeof m, "!abrir %s", conv); chat_send_fw(m); go(S_CHAT, 1); }
+            else if (!ui.dragged && conv && on_row && chat_abrir(conv)) go(S_CHAT, 1);
         }
     }
     glDisable(GL_SCISSOR_TEST);
@@ -2399,6 +2462,12 @@ static bool chat_send(const char *m) {
 static bool chat_send_fw(const char *m) { return chat_send(m); }
 static bool lock_trabajando(void) { pthread_mutex_lock(&ch.m); bool b = ch.busy; pthread_mutex_unlock(&ch.m); return b; }
 static void chat_entered(void) { chat_send("!estado"); }
+// fosil-agente ignora !abrir mientras trabaja: si es otra conversación, no se entra y se avisa.
+static bool chat_abrir(const char *id) {
+    char a[24] = ""; read_file(CHAT_DIR "/actual", a, sizeof a);
+    if (lock_trabajando() && strcmp(a, id)) { toast("Espera a que termine o pulsa Parar"); return false; }
+    char m[48]; snprintf(m, sizeof m, "!abrir %s", id); chat_send_fw(m); return true;
+}
 static void chat_toggle_permisos(void) {
     pthread_mutex_lock(&ch_m_ajustes); bool t = ajustes_total; pthread_mutex_unlock(&ch_m_ajustes);
     if (chat_send(t ? "!permisos limitado" : "!permisos total")) {
@@ -2407,6 +2476,7 @@ static void chat_toggle_permisos(void) {
     }
 }
 static volatile bool notify_req = false; static char notify_who[16];
+static volatile bool convs_req = false;   // chat_thread: «lista» ha cambiado con Chats abierto
 static void tareas_medir(void);
 static void *chat_thread(void *arg) {
     (void)arg; long long sl = -1, se = -1;
@@ -2440,6 +2510,11 @@ static void *chat_thread(void *arg) {
             ch.conocido = *se2 != 0 && strcmp(se2, "?"); ch.sesion = !strcmp(se2, "si"); if (*pe) { ch.total = !strcmp(pe, "total"); pthread_mutex_lock(&ch_m_ajustes); ajustes_total = ch.total; pthread_mutex_unlock(&ch_m_ajustes); }
             pthread_mutex_unlock(&ch.m);
             cambio = true;
+        }
+        if (screen == S_CONVS && !blanked && !stat(CHAT_DIR "/lista", &a)) {   // Chats abierto: recarga la lista cuando el agente la reescribe
+            static long long sv = -1; v = (long long)a.st_mtim.tv_nsec + (long long)a.st_mtime * 7 + (long long)a.st_ino * 1000003LL;
+            if (sv >= 0 && v != sv) { convs_req = true; cambio = true; }
+            sv = v;
         }
         if (cambio) { dirty_req = true; wake(); }
     }
@@ -2643,7 +2718,7 @@ static void draw_chat(void) {
 #define MAX_CONVS 40
 static struct { char id[20], hora[16], titulo[64]; } convs[MAX_CONVS]; static int nconvs;
 static void convs_load(void) {
-    nconvs = 0; FILE *f = fopen(CHAT_DIR "/lista", "r"); if (!f) return;
+    convs_req = false; nconvs = 0; FILE *f = fopen(CHAT_DIR "/lista", "r"); if (!f) return;
     char l[200];
     while (nconvs < MAX_CONVS && fgets(l, sizeof l, f)) {
         l[strcspn(l, "\n")] = 0; char *a = strchr(l, '|'); if (!a) continue; *a++ = 0;
@@ -2653,6 +2728,7 @@ static void convs_load(void) {
     fclose(f);
 }
 static void draw_convs(void) {
+    if (convs_req) convs_load();
     header_to = S_CHAT; header("Chats");
     float start = 122, bottom = H - 24, rowh = 92;
     scroll_area(start, bottom, nconvs * rowh + 10, S_CONVS);
@@ -2667,8 +2743,10 @@ static void draw_convs(void) {
         text(F_MONO, 15, convs[i].hora, 56, y + 50, T.sub, 0);
         text(F_SANS, 26, "×", W - 34 - 35, y + 26, T.sub, 1);
         char m[48];
-        if (c) { snprintf(m, sizeof m, "!abrir %s", convs[i].id); chat_send(m); go(S_CHAT, -1); }
-        if (bx) { snprintf(m, sizeof m, "!borrar %s", convs[i].id); chat_send(m); usleep(150000); convs_load(); }
+        if (c && chat_abrir(convs[i].id)) go(S_CHAT, -1);
+        if (bx && lock_trabajando()) toast("Espera a que termine o pulsa Parar");   // fosil-agente no borra mientras trabaja
+        else if (bx) { snprintf(m, sizeof m, "!borrar %s", convs[i].id);   // se quita ya de la lista; chat_thread la recarga al cambiar «lista»
+            if (chat_send(m)) { memmove(convs + i, convs + i + 1, sizeof convs[0] * (nconvs - i - 1)); nconvs--; break; } }
     }
     glDisable(GL_SCISSOR_TEST);
 }
@@ -2856,7 +2934,7 @@ static void draw_apps(void) {
         if (c && !app_running) {
             if (aps[i].pantalla) {
                 FILE *f = fopen("/run/fosil/lanzar", "w");
-                if (f) { char q[260]; shquote(q, sizeof q, aps[i].dir); fprintf(f, "cd %s && SDL_VIDEODRIVER=kmsdrm XDG_RUNTIME_DIR=/tmp %s\n", q, aps[i].comando); fclose(f); _exit(43); }
+                if (f) { char q[260]; shquote(q, sizeof q, aps[i].dir); fprintf(f, "cd %s && SDL_VIDEODRIVER=kmsdrm XDG_RUNTIME_DIR=/tmp %s\n", q, aps[i].comando); fclose(f); salir(43); }
             } else { toast("Ejecutando %s…", aps[i].nombre); AppE *a = malloc(sizeof(AppE)); *a = aps[i]; app_running = true; pthread_t th; pthread_create(&th, NULL, app_thread, a); pthread_detach(th); }
         }
     }
@@ -3077,7 +3155,7 @@ int main(int argc, char **argv) {
 
     for (;;) {
         double t = now_s();
-        bool anim = (t - trans_start < TRANS) || (t - toast_t < 2.6) || scrolling || fabsf(scroll_v) > 2
+        bool anim = (t - trans_start < TRANS) || (t - toast_lee(NULL) < 2.6) || scrolling || fabsf(scroll_v) > 2
                     || (t - last_touch < AMBIENT && !blanked && !kb_open && !T.metro) || (t - pin_shake < .5) || flip_tick(t) || (kb_open && t - last_touch < .35) || (kb_open && t - kb_open_t < .3) || ui.down
                     || (t - shake_start < .5);
         pthread_mutex_lock(&st.m); if (st.scanning && screen == S_NET) anim = true; pthread_mutex_unlock(&st.m);
@@ -3100,7 +3178,7 @@ int main(int argc, char **argv) {
         float last_y = ui.y;
         while (got && !fake_edge) {
             dirty = true;
-            if (e.type == SDL_QUIT) _exit(0);
+            if (e.type == SDL_QUIT) salir(0);
             if (e.type == EV_POWER) {
                 blanked = !blanked;
                 if (blanked) {
@@ -3132,6 +3210,7 @@ int main(int argc, char **argv) {
         }
         (void)last_y;
         t = now_s();
+        cpu_boost(!blanked && (ui.down || t - last_touch < 1 || t - trans_start < TRANS || scrolling || fabsf(scroll_v) > 2 || flip_i >= 0));
         if (blanked && notify_req) { blanked = false; panel_set(true); last_touch = t; dirty = true; }
         if (blanked) continue;
         if (ui.release) scrolling = false;
@@ -3200,19 +3279,20 @@ int main(int argc, char **argv) {
             draw_screen(screen);
         }
         // Aviso flotante
-        if (t - toast_t < 2.6) {
-            float a = clampf(fminf((t - toast_t) * 6, (2.6f - (t - toast_t)) * 4), 0, 1);
+        char tmsg[160]; double tt = toast_lee(tmsg);
+        if (t - tt < 2.6) {
+            float a = clampf(fminf((t - tt) * 6, (2.6f - (t - tt)) * 4), 0, 1);
             GA = a;
             if (T.metro) {  // franja de aviso a todo lo ancho, como las notificaciones del móvil
                 GA = 1; float ty = (a - 1) * 76;
                 rr(0, ty, W, 76, 0, T.accent);
-                text_fit(F_SANS, 21, toast_msg, 24, ty + 24, W - 48, rgba(1, 1, 1, 1));
+                text_fit(F_SANS, 21, tmsg, 24, ty + 24, W - 48, rgba(1, 1, 1, 1));
             } else {
-            int tw = 0; TTF_SizeUTF8(font(F_SANS, 21), toast_msg, &tw, NULL);
+            int tw = 0; TTF_SizeUTF8(font(F_SANS, 21), tmsg, &tw, NULL);
             float w = tw + 50 > W - 40 ? W - 40 : tw + 50;
             rr(W / 2 - w / 2, 28 + (1 - a) * -20, w, 58, 29, rgba(T.bg[0] * .6f, T.bg[1] * .6f, T.bg[2] * .6f, .95f));
             ring(W / 2 - w / 2, 28 + (1 - a) * -20, w, 58, 29, 1.3f, T.accent);
-            text_fit(F_SANS, 21, toast_msg, W / 2 - w / 2 + 25, 44 + (1 - a) * -20, w - 50, T.text);
+            text_fit(F_SANS, 21, tmsg, W / 2 - w / 2 + 25, 44 + (1 - a) * -20, w - 50, T.text);
             }
             GA = 1;
         }

@@ -106,7 +106,7 @@ while IFS= read -r l <&3; do
             q=$(head -1 "$D/cola"); sed -i 1d "$D/cola"
             empieza "${q%%	*}" "${q#*	}"
             ;;
-        '!permisos total'|'!permisos limitado') [ -n "$pid" ] || { echo "${l#!permisos }" > "$D/permisos"; rm -f "$C"/*/sid.*; estado listo; } ;;
+        '!permisos total'|'!permisos limitado') [ -n "$pid" ] || { echo "${l#!permisos }" > "$D/permisos"; estado listo; } ;;
         '!nuevo') [ -n "$pid" ] || { [ -s "$L" ] && nueva; estado listo; } ;;
         '!abrir '*) id=${l#!abrir }; case $id in *[!0-9]*|'') ;; *) [ -n "$pid" ] || { [ -d "$C/$id" ] && cambia "$id"; estado listo; } ;; esac ;;
         '!borrar '*) id=${l#!borrar }; case $id in *[!0-9]*|'') ;; *) [ -z "$pid" ] && [ -d "$C/$id" ] && { rm -rf "${C:?}/$id"; [ "$id" = "$CONV" ] && nueva; lista; estado listo; } ;; esac ;;
